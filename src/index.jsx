@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 // Nebula.js Qlik hooks for extension integration
-import { useElement, useLayout, useEffect } from "@nebula.js/stardust";
+import { useElement, useLayout, useEffect, useApp, useModel, useSelections } from "@nebula.js/stardust";
 
 // Qlik extension configs (property panel, data targets, settings)
 import properties from "./object-properties";
@@ -15,6 +15,7 @@ import WritebackTable from "./components/writebackTable.jsx";
 /**
  * Main supernova export for the Qlik extension
  * - Handles Qlik engine integration and DOM rendering of React component
+ * - Provides app, model, and selections objects for selection functionality
  */
 export default function supernova(galaxy) {
   return {
@@ -28,16 +29,30 @@ export default function supernova(galaxy) {
       const element = useElement();
       // Current layout/data object from Qlik app
       const layout = useLayout();
+      // Qlik app object for making selections
+      const app = useApp();
+      // Qlik model object for hypercube selections
+      const model = useModel();
+      // Qlik selections object for hypercube selections (correct approach for nebula.js)
+      const selections = useSelections();
 
-      // Renders the WritebackTable every time the layout or element changes
+      // Renders the WritebackTable every time dependencies change
       useEffect(() => {
         // Unmount previous React root if it exists (prevents memory leaks)
         if (element.__root) {
           element.__root.unmount();
         }
-        // Create and render new React root using WritebackTable
+        // Create and render new React root using WritebackTable with all required objects
         element.__root = ReactDOM.createRoot(element);
-        element.__root.render(<WritebackTable layout={layout} pageSize={100} />);
+        element.__root.render(
+          <WritebackTable 
+            layout={layout} 
+            app={app} 
+            model={model}
+            selections={selections}
+            pageSize={100} 
+          />
+        );
         // Cleanup: unmount on component unmount or re-render
         return () => {
           if (element.__root) {
@@ -45,7 +60,7 @@ export default function supernova(galaxy) {
             element.__root = null;
           }
         };
-      }, [element, layout]);
+      }, [element, layout, app, model, selections]); // Added selections to dependency array
     },
   };
 }
