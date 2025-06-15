@@ -1,19 +1,24 @@
 import React, { useState } from "react";
-// Import hypercube data utilities (column and row extraction)
-import { getColumns, getRows } from "../utils/hypercubeUtils";
-// Import pagination utility to slice rows into pages
-import { getPagedRows } from "../utils/paginationUtils";
+import { getColumns, getRows } from "../utils/hypercubeUtils"; // Your hypercube utilities
+import { getPagedRows } from "../utils/paginationUtils"; // Your pagination utility
+import { sortRows } from "../utils/sortUtils"; // The new sort utility
 
-// The main WritebackTable component for rendering paginated hypercube tables
+/**
+ * WritebackTable: Renders a paginated and sortable Qlik table.
+ * Sorting can be controlled by user header click, or via the Qlik property panel.
+ */
 export default function WritebackTable({ layout, pageSize = 25 }) {
-  // React state for the current page index (starting at 0)
+  // State for page number (pagination)
   const [page, setPage] = useState(0);
+  // State for sorting: column index (null = Qlik property panel), and direction
+  const [sortBy, setSortBy] = useState(null);
+  const [sortDir, setSortDir] = useState(true); // true: ascending, false: descending
 
-  // Get the columns (header labels) and data rows from Qlik hypercube
+  // Extract columns and data rows from layout
   const columns = getColumns(layout);
   const rows = getRows(layout);
 
-  // Defensive: if no columns are defined, show a prompt to the user
+  // Defensive UI: Show a helpful message if no dimensions/measures set up
   if (!columns.length) {
     return (
       <div style={{ padding: 24, color: "#666" }}>
@@ -24,29 +29,59 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
     );
   }
 
-  // Use utility to get only the current page of rows and total number of pages
-  const { pagedRows, totalPages } = getPagedRows(rows, page, pageSize);
+  // Use the utility to get the sorted rows (UI sort overrides Qlik panel sort)
+  const displayRows = sortRows(rows, sortBy, sortDir);
 
-  // Handler to safely navigate pages, preventing overflow/underflow
+  // Paginate the sorted rows
+  const { pagedRows, totalPages } = getPagedRows(displayRows, page, pageSize);
+
+  // Handler: User clicks table header to sort
+  function handleHeaderClick(idx) {
+    if (sortBy === idx) {
+      // If already sorting by this column, toggle direction
+      setSortDir((prev) => !prev);
+    } else {
+      // If new column, set ascending sort
+      setSortBy(idx);
+      setSortDir(true);
+    }
+    setPage(0); // Reset to first page on sort
+  }
+
+  // Handler: Reset sort to use Qlik property panel order
+  function resetSort() {
+    setSortBy(null);
+    setSortDir(true);
+    setPage(0);
+  }
+
+  // Handler: Change pages, clamped to valid range
   function gotoPage(newPage) {
     setPage(Math.max(0, Math.min(totalPages - 1, newPage)));
   }
 
-  // Render the table and simple pagination controls
   return (
     <div>
-      {/* Table rendering */}
+      {/* Data Table */}
       <table border="1">
         <thead>
           <tr>
-            {/* Render header columns */}
-            {columns.map((c) => (
-              <th key={c}>{c}</th>
+            {/* Render table headers with clickable sorting */}
+            {columns.map((c, idx) => (
+              <th
+                key={c}
+                style={{ cursor: "pointer", userSelect: "none" }}
+                onClick={() => handleHeaderClick(idx)}
+              >
+                {c}
+                {/* If currently sorted by this column, show arrow */}
+                {sortBy === idx ? (sortDir ? " ▲" : " ▼") : null}
+              </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {/* Render paged rows; each cell shows qText */}
+          {/* Render visible page of rows */}
           {pagedRows.map((row, i) => (
             <tr key={i}>
               {row.map((cell, j) => (
@@ -56,7 +91,7 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
           ))}
         </tbody>
       </table>
-      {/* Pagination controls */}
+      {/* Pagination & Sort Controls */}
       <div
         style={{
           marginTop: 8,
@@ -65,6 +100,12 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
           gap: 12,
         }}
       >
+        {/* Reset sort button if user has sorted with the UI */}
+        {sortBy !== null && (
+          <button onClick={resetSort} style={{ fontWeight: "bold" }}>
+            Reset Sort
+          </button>
+        )}
         <button onClick={() => gotoPage(page - 1)} disabled={page === 0}>
           Prev
         </button>
@@ -77,6 +118,12 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
         >
           Next
         </button>
+      </div>
+      {/* UI Hint for sorting */}
+      <div style={{ fontSize: 12, marginTop: 4, color: "#888" }}>
+        <span>
+          Sorting follows Qlik property panel unless you click a column header.
+        </span>
       </div>
     </div>
   );

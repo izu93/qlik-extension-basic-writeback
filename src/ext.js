@@ -1,13 +1,24 @@
-export default function ext() {
+export default function ext(galaxy) {
   return {
     definition: {
       type: "items",
       component: "accordion",
       items: {
-        data: { uses: "data" },
-        settings: { uses: "settings" },
+        data: {
+          uses: "data",
+        },
+        sorting: {
+          uses: "sorting",
+        },
+        settings: {
+          uses: "settings",
+        },
       },
     },
-    support: { snapshot: true, export: true, exportData: true },
+    support: {
+      snapshot: true,
+      export: true,
+      exportData: true,
+    },
   };
 }
