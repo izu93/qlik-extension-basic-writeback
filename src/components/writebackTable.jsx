@@ -18,7 +18,7 @@ import {
 } from "../utils/selectionUtils";
 
 /**
- * WritebackTable: FIXED VERSION with better selection handling
+ * WritebackTable: Enhanced with Writeback functionality - Defaults to Selection Mode
  */
 export default function WritebackTable({
   layout,
@@ -33,17 +33,75 @@ export default function WritebackTable({
   const [selectedRows, setSelectedRows] = useState(new Set());
   const [selectionMode, setSelectionMode] = useState(false);
 
-  // FIXED: Add state to track individual cell selections (dimension values)
+  // Selection states
   const [selectedCells, setSelectedCells] = useState(new Set());
-
-  // FIXED: Add state to track Qlik selections for visual feedback
   const [qlikSelections, setQlikSelections] = useState(new Set());
-
-  // FIXED: Add loading state for better UX during selections
   const [isApplyingSelection, setIsApplyingSelection] = useState(false);
+
+  // Writeback states
+  const [editedData, setEditedData] = useState({});
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [writebackMode, setWritebackMode] = useState(false);
+
+  // Mode toggle state: always default to selection
+  const [currentMode, setCurrentMode] = useState("selection");
 
   const columns = getColumns(layout);
   const rows = getRows(layout);
+
+  // Configuration for writeback columns - detect what type of view this is
+  const writebackConfig = {
+    // Athlete View columns
+    "MY NOTES": {
+      type: "text",
+      placeholder: "Enter your notes...",
+      defaultValue: "",
+      view: "athlete",
+    },
+    "COACH FEEDBACK": {
+      type: "text",
+      placeholder: "Coach feedback...",
+      defaultValue: "",
+      view: "athlete",
+      readOnly: true, // Athletes can't edit coach feedback
+    },
+    // Coach View columns
+    "ATHLETE NOTES": {
+      type: "text",
+      placeholder: "Athlete notes...",
+      defaultValue: "",
+      view: "coach",
+      readOnly: true, // Coaches can't edit athlete notes
+    },
+    "COACH STRATEGY": {
+      type: "text",
+      placeholder: "Enter coaching strategy...",
+      defaultValue: "",
+      view: "coach",
+    },
+  };
+
+  // Detect which writeback columns are present in the actual data
+  const writebackColumnsPresent = columns.filter((col) =>
+    Object.keys(writebackConfig).includes(col)
+  );
+
+  // Determine view type based on present columns
+  const isAthleteView = writebackColumnsPresent.some(
+    (col) => writebackConfig[col].view === "athlete"
+  );
+  const isCoachView = writebackColumnsPresent.some(
+    (col) => writebackConfig[col].view === "coach"
+  );
+
+  // Auto-enable writeback mode if writeback columns are detected - but don't change mode
+  useEffect(() => {
+    if (writebackColumnsPresent.length > 0) {
+      setWritebackMode(true);
+      // Don't change currentMode - always stay in selection unless user clicks Edit
+    }
+  }, [writebackColumnsPresent.length]);
 
   if (!columns.length) {
     return (
@@ -51,50 +109,184 @@ export default function WritebackTable({
         No data yet.
         <br />
         Add a dimension and a measure.
+        <br />
+        <div
+          style={{
+            marginTop: 16,
+            padding: 12,
+            backgroundColor: "#f8f9fa",
+            borderRadius: 4,
+            fontSize: 13,
+          }}
+        >
+          <strong>Writeback Columns:</strong>
+          <br />
+          <strong>Athlete View:</strong> Add "MY NOTES" and "COACH FEEDBACK" as
+          dimensions
+          <br />
+          <strong>Coach View:</strong> Add "ATHLETE NOTES" and "COACH STRATEGY"
+          as dimensions
+        </div>
       </div>
     );
   }
 
-  // FIXED: Optimize layout effect to reduce flickering - don't update qlikSelections for visual feedback
+  // Layout effect to reduce flickering
   useEffect(() => {
     // Just let Qlik handle its own selection states, don't track them visually
-    // This prevents the green row highlighting after selections
   }, [layout]);
 
-  const displayRows = sortRows(rows, sortBy, sortDir);
-  const { pagedRows, totalPages } = getPagedRows(displayRows, page, pageSize);
-  const dimensionCount = getDimensionCount(layout);
-  const selectionSummary = getSelectionSummary(
-    selectedRows,
-    displayRows.length
-  );
-  const pageStartIndex = page * pageSize;
-  const pageSelectionCount = getPageSelectionCount(
-    selectedRows,
-    pageStartIndex,
-    pageSize,
-    displayRows.length
-  );
-  const isPageFullySelectedState = isPageFullySelected(
-    selectedRows,
-    pageStartIndex,
-    pageSize,
-    displayRows.length
-  );
+  // Writeback functionality
+  const getRowId = (row, index) => {
+    // Create a unique identifier using multiple columns + row index to ensure uniqueness
+    const uniqueParts = [];
 
-  function handleHeaderClick(idx) {
-    if (sortBy === idx) {
-      setSortDir((prev) => !prev);
-    } else {
-      setSortBy(idx);
-      setSortDir(true);
+    // Add first few column values to make it more unique
+    if (row && row.length > 0) {
+      // Use DATE + EVENT + TIME for uniqueness (or first 3 columns if available)
+      for (let i = 0; i < Math.min(3, row.length); i++) {
+        if (row[i] && row[i].qText) {
+          uniqueParts.push(row[i].qText);
+        }
+      }
     }
-    setPage(0);
-  }
+
+    // Always include the actual row index as final fallback for uniqueness
+    uniqueParts.push(`row-${index}`);
+
+    return uniqueParts.join("|");
+  };
+
+  const updateEditedData = (rowId, field, value) => {
+    const key = `${rowId}-${field}`;
+    setEditedData((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+    setHasUnsavedChanges(true);
+  };
+
+  const getEditedValue = (rowId, field) => {
+    const key = `${rowId}-${field}`;
+    return editedData[key] || writebackConfig[field]?.defaultValue || "";
+  };
+
+  const saveAllChanges = async () => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      console.log("Saving all changes:", editedData);
+
+      // Here you would integrate with your Qlik Automation
+      // For now, we'll simulate the save process
+
+      const saveData = {
+        timestamp: new Date().toISOString(),
+        changes: editedData,
+        appId: layout?.qInfo?.qId || "unknown",
+        user: "current_user", // You'd get this from Qlik session
+      };
+
+      // Simulate API call delay
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // Store in localStorage as backup (from your GitHub implementation)
+      localStorage.setItem("writebackData", JSON.stringify(saveData));
+
+      // Show success message
+      console.log("Changes saved successfully!");
+      setHasUnsavedChanges(false);
+      setEditedData({});
+    } catch (error) {
+      console.error("Error saving changes:", error);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const clearAllChanges = () => {
+    setEditedData({});
+    setHasUnsavedChanges(false);
+  };
+
+  // Handle manual mode changes (when user clicks mode buttons)
+  const handleModeChange = (newMode) => {
+    setCurrentMode(newMode);
+    // When switching to selection mode, exit multi-select if active
+    if (newMode === "selection" && selectionMode) {
+      setSelectionMode(false);
+    }
+  };
+
+  // Render writeback cell based on configuration
+  const renderWritebackCell = (rowId, field, config) => {
+    const value = getEditedValue(rowId, field);
+    const isDisabled = config.readOnly || currentMode !== "edit"; // Disable if read-only OR not in edit mode
+
+    if (config.type === "text") {
+      return (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => updateEditedData(rowId, field, e.target.value)}
+          placeholder={config.placeholder}
+          readOnly={isDisabled}
+          disabled={currentMode !== "edit"} // Fully disable in non-edit mode
+          style={{
+            width: "100%",
+            padding: "6px 8px",
+            border: "1px solid #ddd",
+            borderRadius: "4px",
+            fontSize: "13px",
+            backgroundColor: isDisabled ? "#f8f9fa" : "white",
+            color: isDisabled ? "#6c757d" : "#495057",
+            cursor: isDisabled ? "not-allowed" : "text",
+            boxSizing: "border-box",
+            opacity: currentMode !== "edit" ? 0.6 : 1, // Visual indication when mode disabled
+          }}
+        />
+      );
+    } else if (config.type === "dropdown") {
+      return (
+        <select
+          value={value}
+          onChange={(e) => updateEditedData(rowId, field, e.target.value)}
+          disabled={isDisabled}
+          style={{
+            width: "100%",
+            padding: "6px 8px",
+            border: "1px solid #ddd",
+            borderRadius: "4px",
+            fontSize: "13px",
+            backgroundColor: isDisabled ? "#f8f9fa" : "white",
+            cursor: isDisabled ? "not-allowed" : "pointer",
+            boxSizing: "border-box",
+            opacity: currentMode !== "edit" ? 0.6 : 1,
+          }}
+        >
+          {config.options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      );
+    }
+
+    return <span>{value}</span>;
+  };
+
+  // Check if a column is a writeback column
+  const isWritebackColumn = (columnName) => {
+    return Object.keys(writebackConfig).includes(columnName);
+  };
 
   /**
    * Toggle individual cell selection (LOCAL ONLY - no immediate Qlik selection)
-   * FIXED: When selecting/deselecting, handle all matching values in the same dimension
    */
   function handleCellSelection(rowIndex, columnIndex, cellValue) {
     const cellKey = `${rowIndex}-${columnIndex}-${cellValue.qText}-${cellValue.qElemNumber}`;
@@ -131,17 +323,21 @@ export default function WritebackTable({
     }
 
     setSelectedCells(newSelections);
-    // FIXED: No immediate Qlik selection - just local state change
   }
 
-  // FIXED: Cell clicks should not trigger immediate selection in selection mode
+  // Cell clicks should respect current mode
   async function onCellClick(columnIndex, cellValue, row, pageRowIndex) {
-    // FIXED: In selection mode, only allow checkbox interaction, not cell clicks
-    if (selectionMode) {
-      return; // Don't do immediate selections in selection mode
+    // In edit mode, don't allow cell selection (focus on writeback editing)
+    if (currentMode === "edit") {
+      return;
     }
 
-    // Regular immediate selection for non-selection mode
+    // In selection mode, only allow selection if not in multi-select checkbox mode
+    if (currentMode === "selection" && selectionMode) {
+      return; // Don't do immediate selections in multi-select checkbox mode
+    }
+
+    // Regular immediate selection for selection mode
     try {
       const success = await handleCellClick(
         app,
@@ -164,7 +360,7 @@ export default function WritebackTable({
     }
   }
 
-  // FIXED: Apply batch cell selections only when button is clicked
+  // Apply batch cell selections only when button is clicked
   async function onApplyCellSelections() {
     setIsApplyingSelection(true);
 
@@ -223,7 +419,6 @@ export default function WritebackTable({
 
           if (field && values.length > 0) {
             await field.selectValues(values, false, false);
-
             success = true;
           }
         } catch (fieldError) {
@@ -233,7 +428,7 @@ export default function WritebackTable({
 
       if (success) {
         setSelectedCells(new Set()); // Clear local selections
-        setSelectionMode(false); // Exit selection mode
+        setSelectionMode(false); // Exit multi-select checkbox mode but stay in Select mode
       }
     } catch (error) {
       console.error("Error applying cell selections:", error);
@@ -244,7 +439,7 @@ export default function WritebackTable({
     }
   }
 
-  // FIXED: Smoother clear all selections
+  // Clear all selections
   async function onClearAllSelections() {
     setIsApplyingSelection(true);
 
@@ -252,37 +447,61 @@ export default function WritebackTable({
       const success = await clearAllQlikSelections(app, model, selections);
       if (success) {
         setSelectedRows(clearLocalSelections());
-        setSelectionMode(false);
-        // Don't manually clear qlikSelections - let layout update handle it
+        setSelectionMode(false); // Exit multi-select checkbox mode but stay in Select mode
       }
     } catch (error) {
       console.error("Error clearing selections:", error);
     } finally {
-      // Add a small delay to prevent flashing
       setTimeout(() => {
         setIsApplyingSelection(false);
       }, 100);
     }
   }
 
-  function togglePageSelection() {
-    if (isPageFullySelectedState) {
-      const newSelections = deselectAllOnPage(
-        selectedRows,
-        pageStartIndex,
-        pageSize,
-        displayRows.length
-      );
-      setSelectedRows(newSelections);
+  const displayRows = sortRows(rows, sortBy, sortDir);
+  const { pagedRows, totalPages } = getPagedRows(displayRows, page, pageSize);
+  const dimensionCount = getDimensionCount(layout);
+  const selectionSummary = getSelectionSummary(
+    selectedRows,
+    displayRows.length
+  );
+  const pageStartIndex = page * pageSize;
+  const pageSelectionCount = getPageSelectionCount(
+    selectedRows,
+    pageStartIndex,
+    pageSize,
+    displayRows.length
+  );
+  const isPageFullySelectedState = isPageFullySelected(
+    selectedRows,
+    pageStartIndex,
+    pageSize,
+    displayRows.length
+  );
+
+  // Update column widths to include writeback columns
+  const columnWidths = {
+    DATE: "120px",
+    EVENT: "140px",
+    TIME: "100px",
+    TARGET: "100px",
+    DIFF: "100px",
+    PHASE: "120px",
+    FOCUS: "140px",
+    "MY NOTES": "200px",
+    "COACH FEEDBACK": "200px",
+    "ATHLETE NOTES": "200px",
+    "COACH STRATEGY": "200px",
+  };
+
+  function handleHeaderClick(idx) {
+    if (sortBy === idx) {
+      setSortDir((prev) => !prev);
     } else {
-      const newSelections = selectAllOnPage(
-        selectedRows,
-        pageStartIndex,
-        pageSize,
-        displayRows.length
-      );
-      setSelectedRows(newSelections);
+      setSortBy(idx);
+      setSortDir(true);
     }
+    setPage(0);
   }
 
   function resetSort() {
@@ -295,18 +514,9 @@ export default function WritebackTable({
     setPage(Math.max(0, Math.min(totalPages - 1, newPage)));
   }
 
-  const columnWidths = {
-    DATE: "120px",
-    COACH_ID: "100px",
-    COACH_NAME: "150px",
-    SWIMMER_ID: "120px",
-    SWIMMER_NAME: "150px",
-    "avg(TIME)": "120px",
-  };
-
   return (
     <div style={{ width: "100%", height: "100%" }}>
-      {/* Selection controls */}
+      {/* Mode Toggle & Controls */}
       <div
         style={{
           display: "flex",
@@ -317,97 +527,250 @@ export default function WritebackTable({
           borderBottom: "1px solid #eee",
         }}
       >
-        <div style={{ fontSize: "14px", color: "#495057" }}>
-          {selectedCells.size > 0 ? (
-            <span>
-              <strong>{selectedCells.size}</strong> dimension values selected
-              for batch operation
-            </span>
+        {/* Left side: Mode info and status */}
+        <div
+          style={{
+            fontSize: "14px",
+            color: "#495057",
+            display: "flex",
+            alignItems: "center",
+            gap: "16px",
+          }}
+        >
+          {/* Mode Toggle - only show if writeback columns are present */}
+          {writebackColumnsPresent.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span
+                style={{
+                  fontSize: "12px",
+                  color: "#6c757d",
+                  fontWeight: "500",
+                }}
+              >
+                Mode:
+              </span>
+              <button
+                onClick={() => handleModeChange("edit")}
+                style={{
+                  padding: "4px 8px",
+                  backgroundColor:
+                    currentMode === "edit" ? "#007acc" : "#e9ecef",
+                  color: currentMode === "edit" ? "white" : "#6c757d",
+                  border: "none",
+                  borderRadius: "3px",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                ✏️ Edit
+              </button>
+              <button
+                onClick={() => handleModeChange("selection")}
+                style={{
+                  padding: "4px 8px",
+                  backgroundColor:
+                    currentMode === "selection" ? "#007acc" : "#e9ecef",
+                  color: currentMode === "selection" ? "white" : "#6c757d",
+                  border: "none",
+                  borderRadius: "3px",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                Select
+              </button>
+            </div>
+          )}
+
+          {/* Status information based on current mode */}
+          {currentMode === "edit" && writebackColumnsPresent.length > 0 ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              {/* View Type Indicator */}
+              <span
+                style={{
+                  padding: "2px 8px",
+                  backgroundColor: isAthleteView
+                    ? "#e3f2fd"
+                    : isCoachView
+                    ? "#f3e5f5"
+                    : "#f5f5f5",
+                  color: isAthleteView
+                    ? "#1976d2"
+                    : isCoachView
+                    ? "#7b1fa2"
+                    : "#666",
+                  borderRadius: "12px",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                {isAthleteView && isCoachView
+                  ? "Mixed View"
+                  : isAthleteView
+                  ? "👤 Athlete View"
+                  : isCoachView
+                  ? "🏃‍♂️ Coach View"
+                  : "Standard View"}
+              </span>
+
+              {/* Writeback Status */}
+              <span>
+                {hasUnsavedChanges ? (
+                  <span style={{ color: "#dc3545", fontWeight: "500" }}>
+                    <strong>{Object.keys(editedData).length}</strong> unsaved
+                    changes
+                  </span>
+                ) : (
+                  <span style={{ color: "#28a745" }}>All changes saved</span>
+                )}
+              </span>
+
+              {/* Writeback Columns Info */}
+              <span style={{ fontSize: "12px", color: "#6c757d" }}>
+                Writeback: {writebackColumnsPresent.join(", ")}
+              </span>
+            </div>
+          ) : currentMode === "selection" ? (
+            <div>
+              {selectedCells.size > 0 ? (
+                <span>
+                  <strong>{selectedCells.size}</strong> dimension values
+                  selected for batch operation
+                </span>
+              ) : (
+                <span>
+                  Click dimension cells to select • Use checkboxes for batch
+                  operations
+                </span>
+              )}
+            </div>
           ) : (
-            <span>
-              Click dimension cells to select • Use checkboxes in Selection Mode
-              for batch operation
-            </span>
+            <span>Add writeback columns as dimensions for editing</span>
           )}
         </div>
 
+        {/* Right side: Mode-specific controls */}
         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-          {/* FIXED: Loading indicator */}
+          {/* Loading indicators */}
           {isApplyingSelection && (
             <span style={{ fontSize: "12px", color: "#007acc" }}>
               Applying selection...
             </span>
           )}
 
-          {selectedCells.size > 0 && (
+          {isSaving && (
+            <span style={{ fontSize: "12px", color: "#28a745" }}>
+              Saving changes...
+            </span>
+          )}
+
+          {/* Edit Mode Controls */}
+          {currentMode === "edit" && writebackColumnsPresent.length > 0 && (
             <>
               <button
-                onClick={onApplyCellSelections}
-                disabled={isApplyingSelection}
+                onClick={saveAllChanges}
+                disabled={!hasUnsavedChanges || isSaving}
                 style={{
                   padding: "6px 12px",
-                  backgroundColor: isApplyingSelection ? "#6c757d" : "#28a745",
+                  backgroundColor:
+                    !hasUnsavedChanges || isSaving ? "#6c757d" : "#28a745",
                   color: "white",
                   border: "none",
                   borderRadius: "4px",
-                  cursor: isApplyingSelection ? "not-allowed" : "pointer",
+                  cursor:
+                    !hasUnsavedChanges || isSaving ? "not-allowed" : "pointer",
                   fontSize: "12px",
                   fontWeight: "500",
                 }}
               >
-                {isApplyingSelection
-                  ? "Applying..."
-                  : `Apply Cell Selections (${selectedCells.size})`}
+                {isSaving
+                  ? "Saving..."
+                  : hasUnsavedChanges
+                  ? `Save Changes (${Object.keys(editedData).length})`
+                  : "No Changes"}
               </button>
+
               <button
-                onClick={() => setSelectedCells(new Set())}
+                onClick={clearAllChanges}
+                disabled={!hasUnsavedChanges || isSaving}
+                style={{
+                  padding: "6px 12px",
+                  backgroundColor: "#dc3545",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor:
+                    !hasUnsavedChanges || isSaving ? "not-allowed" : "pointer",
+                  fontSize: "12px",
+                }}
+              >
+                Clear Changes
+              </button>
+            </>
+          )}
+
+          {/* Selection Mode Controls */}
+          {currentMode === "selection" && (
+            <>
+              {selectedCells.size > 0 && (
+                <>
+                  <button
+                    onClick={onApplyCellSelections}
+                    disabled={isApplyingSelection}
+                    style={{
+                      padding: "6px 12px",
+                      backgroundColor: isApplyingSelection
+                        ? "#6c757d"
+                        : "#28a745",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: isApplyingSelection ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      fontWeight: "500",
+                    }}
+                  >
+                    {isApplyingSelection
+                      ? "Applying..."
+                      : `Apply Cell Selections (${selectedCells.size})`}
+                  </button>
+                  <button
+                    onClick={() => setSelectedCells(new Set())}
+                    disabled={isApplyingSelection}
+                    style={{
+                      padding: "6px 12px",
+                      backgroundColor: "#6c757d",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: isApplyingSelection ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                    }}
+                  >
+                    Clear Cell Selections
+                  </button>
+                </>
+              )}
+
+              <button
+                onClick={() => setSelectionMode(!selectionMode)}
                 disabled={isApplyingSelection}
                 style={{
                   padding: "6px 12px",
-                  backgroundColor: "#6c757d",
-                  color: "white",
+                  backgroundColor: selectionMode ? "#ffc107" : "#007acc",
+                  color: selectionMode ? "#000" : "white",
                   border: "none",
                   borderRadius: "4px",
                   cursor: isApplyingSelection ? "not-allowed" : "pointer",
                   fontSize: "12px",
                 }}
               >
-                Clear Cell Selections
+                {selectionMode ? "Exit Multi Select" : "Multi Select"}
               </button>
             </>
           )}
-
-          <button
-            onClick={() => setSelectionMode(!selectionMode)}
-            disabled={isApplyingSelection}
-            style={{
-              padding: "6px 12px",
-              backgroundColor: selectionMode ? "#ffc107" : "#007acc",
-              color: selectionMode ? "#000" : "white",
-              border: "none",
-              borderRadius: "4px",
-              cursor: isApplyingSelection ? "not-allowed" : "pointer",
-              fontSize: "12px",
-            }}
-          >
-            {selectionMode ? "Exit Selection Mode" : "Selection Mode"}
-          </button>
-
-          <button
-            onClick={onClearAllSelections}
-            disabled={isApplyingSelection}
-            style={{
-              padding: "6px 12px",
-              backgroundColor: isApplyingSelection ? "#6c757d" : "#6c757d", // Changed to grey
-              color: "white",
-              border: "none",
-              borderRadius: "4px",
-              cursor: isApplyingSelection ? "not-allowed" : "pointer",
-              fontSize: "12px",
-            }}
-          >
-            {isApplyingSelection ? "Clearing..." : "Clear All"}
-          </button>
         </div>
       </div>
 
@@ -444,7 +807,7 @@ export default function WritebackTable({
                   <th
                     key={c}
                     style={{
-                      cursor: "pointer",
+                      cursor: isWritebackColumn(c) ? "default" : "pointer",
                       userSelect: "none",
                       padding: "12px 8px",
                       backgroundColor: "#f8f9fa",
@@ -457,7 +820,9 @@ export default function WritebackTable({
                       textAlign: "left",
                       boxShadow: "0 2px 2px -1px rgba(0, 0, 0, 0.1)",
                     }}
-                    onClick={() => handleHeaderClick(idx)}
+                    onClick={() =>
+                      !isWritebackColumn(c) && handleHeaderClick(idx)
+                    }
                   >
                     <div
                       style={{
@@ -468,19 +833,20 @@ export default function WritebackTable({
                     >
                       <span>
                         {c}
-                        {isColumnSelectable(idx, layout) && (
-                          <span
-                            style={{
-                              fontSize: "10px",
-                              color: "#007acc",
-                              marginLeft: "4px",
-                            }}
-                          >
-                            ✓
-                          </span>
-                        )}
+                        {isWritebackColumn(c) &&
+                          !writebackConfig[c].readOnly && (
+                            <span
+                              style={{
+                                fontSize: "10px",
+                                color: "#28a745",
+                                marginLeft: "4px",
+                              }}
+                            >
+                              ✏️
+                            </span>
+                          )}
                       </span>
-                      {sortBy === idx && (
+                      {sortBy === idx && !isWritebackColumn(c) && (
                         <span style={{ color: "#007acc", fontSize: "12px" }}>
                           {sortDir ? "▲" : "▼"}
                         </span>
@@ -494,7 +860,6 @@ export default function WritebackTable({
             <tbody>
               {pagedRows.map((row, i) => {
                 const actualRowIndex = pageStartIndex + i;
-                // FIXED: Remove green coloring for Qlik selected rows
                 const backgroundColor = i % 2 === 0 ? "#ffffff" : "#f9f9f9";
 
                 return (
@@ -513,10 +878,11 @@ export default function WritebackTable({
                     }}
                   >
                     {row.map((cell, j) => {
+                      const columnName = columns[j];
                       const cellKey = `${i}-${j}-${cell.qText}-${cell.qElemNumber}`;
                       const isCellSelected = selectedCells.has(cellKey);
 
-                      // FIXED: Check if this cell value is selected anywhere in this dimension
+                      // Check if this cell value is selected anywhere in this dimension
                       const isValueSelected =
                         isColumnSelectable(j, layout) &&
                         Array.from(selectedCells).some((selectedKey) => {
@@ -533,60 +899,96 @@ export default function WritebackTable({
                           );
                         });
 
+                      // Check if this is a writeback column
+                      const isWriteback = isWritebackColumn(columnName);
+                      const rowId = getRowId(row, actualRowIndex);
+
                       return (
                         <td
                           key={j}
                           style={{
-                            padding: "4px 8px",
+                            padding: "8px",
                             border: "1px solid #eee",
                             borderTop: "none",
                             fontSize: "13px",
-                            width: columnWidths[columns[j]] || "120px",
+                            width: columnWidths[columnName] || "120px",
                             overflow: "hidden",
-                            textOverflow: "ellipsis",
                             whiteSpace: "nowrap",
-                            cursor:
-                              isColumnSelectable(j, layout) && !selectionMode
-                                ? "pointer" // Only show pointer when NOT in selection mode
-                                : "default",
-                            backgroundColor: isValueSelected
-                              ? "#d4edda" // FIXED: Light green for selected values (instead of yellow)
-                              : isColumnSelectable(j, layout)
-                              ? "rgba(0, 123, 204, 0.05)" // Always highlight dimension columns
-                              : "transparent",
+                            cursor: isWriteback
+                              ? "default"
+                              : currentMode === "edit"
+                              ? "default"
+                              : currentMode === "selection" &&
+                                isColumnSelectable(j, layout) &&
+                                !selectionMode
+                              ? "pointer"
+                              : "default",
+                            backgroundColor:
+                              isValueSelected && currentMode === "selection"
+                                ? "#d4edda"
+                                : isWriteback
+                                ? writebackConfig[columnName].readOnly
+                                  ? "#f8f9fa"
+                                  : "#fff8e1"
+                                : currentMode === "selection" &&
+                                  isColumnSelectable(j, layout) &&
+                                  !isWriteback
+                                ? "rgba(0, 123, 204, 0.05)"
+                                : "transparent",
                           }}
-                          title={cell.qText}
-                          onClick={() => onCellClick(j, cell, row, i)}
+                          title={
+                            isWriteback
+                              ? `${columnName} ${
+                                  writebackConfig[columnName].readOnly
+                                    ? "(Read-only)"
+                                    : "(Editable)"
+                                }`
+                              : cell.qText
+                          }
+                          onClick={() =>
+                            !isWriteback && onCellClick(j, cell, row, i)
+                          }
                         >
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "4px",
-                              justifyContent: "space-between",
-                            }}
-                          >
-                            <span style={{ flex: 1 }}>{cell.qText}</span>
+                          {isWriteback ? (
+                            // Render writeback input
+                            renderWritebackCell(
+                              rowId,
+                              columnName,
+                              writebackConfig[columnName]
+                            )
+                          ) : (
+                            // Render regular cell
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "4px",
+                                justifyContent: "space-between",
+                              }}
+                            >
+                              <span style={{ flex: 1 }}>{cell.qText}</span>
 
-                            {/* FIXED: Checkbox shows checked if this value is selected anywhere */}
-                            {selectionMode && isColumnSelectable(j, layout) && (
-                              <input
-                                type="checkbox"
-                                checked={isValueSelected}
-                                onChange={(e) => {
-                                  e.stopPropagation(); // Prevent cell click
-                                  handleCellSelection(i, j, cell);
-                                }}
-                                style={{
-                                  width: "12px",
-                                  height: "12px",
-                                  cursor: "pointer",
-                                  flexShrink: 0,
-                                }}
-                                title={`Select all instances of "${cell.qText}" for batch operation`}
-                              />
-                            )}
-                          </div>
+                              {currentMode === "selection" &&
+                                selectionMode &&
+                                isColumnSelectable(j, layout) && (
+                                  <input
+                                    type="checkbox"
+                                    checked={isValueSelected}
+                                    onChange={(e) => {
+                                      e.stopPropagation();
+                                      handleCellSelection(i, j, cell);
+                                    }}
+                                    style={{
+                                      width: "12px",
+                                      height: "12px",
+                                      cursor: "pointer",
+                                      flexShrink: 0,
+                                    }}
+                                    title={`Select all instances of "${cell.qText}" for batch operation`}
+                                  />
+                                )}
+                            </div>
+                          )}
                         </td>
                       );
                     })}
@@ -687,11 +1089,32 @@ export default function WritebackTable({
             Showing {pagedRows.length} of {displayRows.length} rows
           </div>
           <div style={{ fontSize: 11, marginTop: 2 }}>
-            Click dimension cells to select • ✓ = Selectable
-            {pageSelectionCount > 0 && (
-              <span style={{ color: "#007acc", marginLeft: "8px" }}>
-                • {pageSelectionCount} selected on page
+            {currentMode === "edit" && writebackColumnsPresent.length > 0 ? (
+              <span>
+                ✏️ = Editable •
+                {hasUnsavedChanges && (
+                  <span style={{ color: "#dc3545", marginLeft: "8px" }}>
+                    {Object.keys(editedData).length} unsaved changes
+                  </span>
+                )}
+                {!hasUnsavedChanges && (
+                  <span style={{ color: "#28a745", marginLeft: "8px" }}>
+                    All saved
+                  </span>
+                )}
               </span>
+            ) : currentMode === "selection" ? (
+              <span>
+                Click dimension cells to select • Use checkboxes for batch
+                operations
+                {pageSelectionCount > 0 && (
+                  <span style={{ color: "#007acc", marginLeft: "8px" }}>
+                    • {pageSelectionCount} selected on page
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span>Add writeback columns as dimensions for editing</span>
             )}
           </div>
         </div>
