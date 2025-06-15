@@ -1,81 +1,44 @@
-// Import React and ReactDOM for JSX rendering and root management
 import React from "react";
 import ReactDOM from "react-dom/client";
-// Import Nebula hooks for Qlik extension integration
+
+// Nebula.js Qlik hooks for extension integration
 import { useElement, useLayout, useEffect } from "@nebula.js/stardust";
 
-// Import Qlik extension property/config definitions
+// Qlik extension configs (property panel, data targets, settings)
 import properties from "./object-properties";
 import data from "./data";
 import ext from "./ext";
 
-// Pure React component to render a Qlik table
-function MyTable({ layout }) {
-  // If no dimensions/measures are configured, prompt the user
-  if (!layout.qHyperCube || !layout.qHyperCube.qDimensionInfo.length) {
-    return (
-      <div style={{ padding: 24, color: "#666" }}>
-        No data yet.
-        <br />
-        Add a dimension and a measure.
-      </div>
-    );
-  }
-  // Extract columns (headers) and rows from the hypercube data structure
-  const hc = layout.qHyperCube;
-  const columns = [...hc.qDimensionInfo, ...hc.qMeasureInfo].map(
-    (f) => f.qFallbackTitle
-  );
-  const rows = hc.qDataPages[0].qMatrix;
+// Import the modular WritebackTable React component
+import WritebackTable from "./components/writebackTable.jsx";
 
-  // Render a basic HTML table using JSX
-  return (
-    <table border="1">
-      <thead>
-        <tr>
-          {columns.map((c) => (
-            <th key={c}>{c}</th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row, i) => (
-          <tr key={i}>
-            {row.map((cell, j) => (
-              <td key={j}>{cell.qText}</td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-// Main entry point for the Qlik supernova extension
+/**
+ * Main supernova export for the Qlik extension
+ * - Handles Qlik engine integration and DOM rendering of React component
+ */
 export default function supernova(galaxy) {
   return {
-    // Qlik associative engine config (data structure, property panel, etc.)
+    // Qlik associative engine config: props and data structure
     qae: { properties, data },
-    // Nebula property panel/ext config
+    // Nebula settings for property panel and options
     ext: ext(galaxy),
-    // Main component mounting function for the extension
+    // Visualization rendering logic
     component() {
-      // Get reference to the DOM element Nebula provides
+      // Reference to Nebula-provided DOM element for rendering
       const element = useElement();
-      // Get current data/layout from Qlik
+      // Current layout/data object from Qlik app
       const layout = useLayout();
 
-      // React-like effect: runs every time 'element' or 'layout' changes
+      // Renders the WritebackTable every time the layout or element changes
       useEffect(() => {
-        // If we've rendered React into this element before, unmount the previous root
+        // Unmount previous React root if it exists (prevents memory leaks)
         if (element.__root) {
           element.__root.unmount();
         }
-        // Create a new React root in the provided DOM element
+        // Create and render new React root using WritebackTable
         element.__root = ReactDOM.createRoot(element);
-        // Render the table component, passing in the current layout
-        element.__root.render(<MyTable layout={layout} />);
-        // Clean up on component unmount or re-render
+        element.__root.render(<WritebackTable layout={layout} pageSize={25} />);
+        // Cleanup: unmount on component unmount or re-render
         return () => {
           if (element.__root) {
             element.__root.unmount();
