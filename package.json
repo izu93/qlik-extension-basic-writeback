@@ -13,7 +13,9 @@
     "stardust"
   ],
   "files": [
-    "dist"
+    "dist",
+    "basic-writeback.js",
+    "basic-writeback.qext"
   ],
   "engines": {
     "node": ">=18.10.0"
@@ -44,6 +46,8 @@
     "@nebula.js/stardust": ">=5.0.0"
   },
   "dependencies": {
-    "@nebula.js/sn-table": "^4.8.3"
+    "@nebula.js/sn-table": "^4.8.3",
+    "react": "^17.0.2",
+    "react-dom": "^17.0.2"
   }
 }

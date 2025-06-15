@@ -1,8 +1,13 @@
-const properties = {
+export default {
+  qHyperCubeDef: {
+    qDimensions: [],
+    qMeasures: [],
+    qInitialDataFetch: [{ qWidth: 10, qHeight: 100 }],
+  },
   showTitles: true,
-  title: '',
-  subtitle: '',
-  footnote: '',
+  title: "",
+  subtitle: "",
+  footnote: "",
+  disableNavMenu: false,
+  showDetails: false,
 };
-
-export default properties;

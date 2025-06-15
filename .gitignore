@@ -12,3 +12,6 @@ dist/
 
 test/integration/artifacts
 test/integration/test-report
+
+basic-writeback-ext
+bundle-analysis.html

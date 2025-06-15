@@ -1,5 +1,8 @@
 {
   "name": "basic-writeback",
-  "icon": "extension",
-  "preview": ""
+  "description": "Basic Qlik Writeback Table Extension",
+  "version": "0.1.0",
+  "author": "Karthik Burra",
+  "type": "visualization",
+  "main": "index.js"
 }
