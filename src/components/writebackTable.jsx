@@ -1,16 +1,20 @@
 import React, { useState } from "react";
+// Import hypercube data utilities (column and row extraction)
+import { getColumns, getRows } from "../utils/hypercubeUtils";
+// Import pagination utility to slice rows into pages
+import { getPagedRows } from "../utils/paginationUtils";
 
-/**
- * WritebackTable component
- * - Displays Qlik hypercube data as a table
- * - Adds simple client-side pagination (default 25 rows/page)
- */
+// The main WritebackTable component for rendering paginated hypercube tables
 export default function WritebackTable({ layout, pageSize = 25 }) {
-  // React state to track the current page index (starting at 0)
+  // React state for the current page index (starting at 0)
   const [page, setPage] = useState(0);
 
-  // Show a prompt if the table isn't configured with dims/measures yet
-  if (!layout.qHyperCube || !layout.qHyperCube.qDimensionInfo.length) {
+  // Get the columns (header labels) and data rows from Qlik hypercube
+  const columns = getColumns(layout);
+  const rows = getRows(layout);
+
+  // Defensive: if no columns are defined, show a prompt to the user
+  if (!columns.length) {
     return (
       <div style={{ padding: 24, color: "#666" }}>
         No data yet.
@@ -20,34 +24,29 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
     );
   }
 
-  // Extract columns (headers) and data rows from Qlik's hypercube structure
-  const hc = layout.qHyperCube;
-  const columns = [...hc.qDimensionInfo, ...hc.qMeasureInfo].map(
-    (f) => f.qFallbackTitle
-  );
-  const rows = hc.qDataPages[0].qMatrix;
+  // Use utility to get only the current page of rows and total number of pages
+  const { pagedRows, totalPages } = getPagedRows(rows, page, pageSize);
 
-  // Pagination: compute total pages and get only rows for current page
-  const totalPages = Math.ceil(rows.length / pageSize);
-  const pagedRows = rows.slice(page * pageSize, (page + 1) * pageSize);
-
-  // Navigation logic for Prev/Next buttons
+  // Handler to safely navigate pages, preventing overflow/underflow
   function gotoPage(newPage) {
     setPage(Math.max(0, Math.min(totalPages - 1, newPage)));
   }
 
-  // Render the paginated table and controls
+  // Render the table and simple pagination controls
   return (
     <div>
+      {/* Table rendering */}
       <table border="1">
         <thead>
           <tr>
+            {/* Render header columns */}
             {columns.map((c) => (
               <th key={c}>{c}</th>
             ))}
           </tr>
         </thead>
         <tbody>
+          {/* Render paged rows; each cell shows qText */}
           {pagedRows.map((row, i) => (
             <tr key={i}>
               {row.map((cell, j) => (
@@ -57,19 +56,21 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
           ))}
         </tbody>
       </table>
-      {/* Pagination Controls */}
+      {/* Pagination controls */}
       <div
-        style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12 }}
+        style={{
+          marginTop: 8,
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+        }}
       >
-        {/* Previous button */}
         <button onClick={() => gotoPage(page - 1)} disabled={page === 0}>
           Prev
         </button>
-        {/* Current page indicator */}
         <span>
           Page {page + 1} of {totalPages}
         </span>
-        {/* Next button */}
         <button
           onClick={() => gotoPage(page + 1)}
           disabled={page >= totalPages - 1}
