@@ -1,24 +1,33 @@
 import React, { useState } from "react";
-import { getColumns, getRows } from "../utils/hypercubeUtils"; // Your hypercube utilities
-import { getPagedRows } from "../utils/paginationUtils"; // Your pagination utility
-import { sortRows } from "../utils/sortUtils"; // The new sort utility
+import { getColumns, getRows } from "../utils/hypercubeUtils"; // Extract columns and rows from Qlik hypercube
+import { getPagedRows } from "../utils/paginationUtils"; // Handle table pagination logic
+import { sortRows } from "../utils/sortUtils"; // Handle client-side sorting functionality
 
 /**
- * WritebackTable: Renders a paginated and sortable Qlik table.
- * Sorting can be controlled by user header click, or via the Qlik property panel.
+ * WritebackTable: Main table component for Qlik extension
+ * - Displays paginated data from Qlik hypercube (100 rows per page)
+ * - Supports client-side sorting by clicking column headers
+ * - Features scrollable table body with aligned columns
+ * - Falls back to Qlik property panel sorting when no client sort applied
+ *
+ * @param {Object} layout - Qlik layout object containing hypercube data
+ * @param {number} pageSize - Number of rows to display per page (default: 100)
  */
-export default function WritebackTable({ layout, pageSize = 25 }) {
-  // State for page number (pagination)
+export default function WritebackTable({ layout, pageSize = 100 }) {
+  // Pagination state - tracks current page number
   const [page, setPage] = useState(0);
-  // State for sorting: column index (null = Qlik property panel), and direction
+
+  // Sorting state - tracks which column to sort by (null = use Qlik sorting)
   const [sortBy, setSortBy] = useState(null);
-  const [sortDir, setSortDir] = useState(true); // true: ascending, false: descending
 
-  // Extract columns and data rows from layout
-  const columns = getColumns(layout);
-  const rows = getRows(layout);
+  // Sort direction state - true for ascending, false for descending
+  const [sortDir, setSortDir] = useState(true);
 
-  // Defensive UI: Show a helpful message if no dimensions/measures set up
+  // Extract table structure and data from Qlik layout object
+  const columns = getColumns(layout); // Get column headers from dimensions + measures
+  const rows = getRows(layout); // Get data matrix from hypercube
+
+  // Show helpful message if no data configuration exists
   if (!columns.length) {
     return (
       <div style={{ padding: 24, color: "#666" }}>
@@ -29,101 +38,280 @@ export default function WritebackTable({ layout, pageSize = 25 }) {
     );
   }
 
-  // Use the utility to get the sorted rows (UI sort overrides Qlik panel sort)
+  // Apply sorting - client sort overrides Qlik property panel sort
   const displayRows = sortRows(rows, sortBy, sortDir);
 
-  // Paginate the sorted rows
+  // Apply pagination to sorted data
   const { pagedRows, totalPages } = getPagedRows(displayRows, page, pageSize);
 
-  // Handler: User clicks table header to sort
+  /**
+   * Handle column header click for sorting
+   * - Toggle direction if same column clicked again
+   * - Set ascending sort for new column selection
+   * - Reset to first page when sorting changes
+   */
   function handleHeaderClick(idx) {
     if (sortBy === idx) {
-      // If already sorting by this column, toggle direction
-      setSortDir((prev) => !prev);
+      setSortDir((prev) => !prev); // Toggle sort direction
     } else {
-      // If new column, set ascending sort
-      setSortBy(idx);
-      setSortDir(true);
+      setSortBy(idx); // Set new sort column
+      setSortDir(true); // Default to ascending
     }
-    setPage(0); // Reset to first page on sort
+    setPage(0); // Reset pagination to first page
   }
 
-  // Handler: Reset sort to use Qlik property panel order
+  /**
+   * Reset sorting to use Qlik property panel order
+   * - Clears client-side sort override
+   * - Returns to first page
+   */
   function resetSort() {
     setSortBy(null);
     setSortDir(true);
     setPage(0);
   }
 
-  // Handler: Change pages, clamped to valid range
+  /**
+   * Navigate to specific page with bounds checking
+   * - Ensures page number stays within valid range
+   */
   function gotoPage(newPage) {
     setPage(Math.max(0, Math.min(totalPages - 1, newPage)));
   }
 
+  // Calculate column widths for alignment
+  const columnWidths = {
+    DATE: "120px",
+    COACH_ID: "100px",
+    COACH_NAME: "150px",
+    SWIMMER_ID: "120px",
+    SWIMMER_NAME: "150px",
+    "avg(TIME)": "120px",
+  };
+
   return (
-    <div>
-      {/* Data Table */}
-      <table border="1">
-        <thead>
-          <tr>
-            {/* Render table headers with clickable sorting */}
-            {columns.map((c, idx) => (
-              <th
-                key={c}
-                style={{ cursor: "pointer", userSelect: "none" }}
-                onClick={() => handleHeaderClick(idx)}
-              >
-                {c}
-                {/* If currently sorted by this column, show arrow */}
-                {sortBy === idx ? (sortDir ? " ▲" : " ▼") : null}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {/* Render visible page of rows */}
-          {pagedRows.map((row, i) => (
-            <tr key={i}>
-              {row.map((cell, j) => (
-                <td key={j}>{cell.qText}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {/* Pagination & Sort Controls */}
+    <div style={{ width: "100%", height: "100%" }}>
+      {/* Single table with scrollable container */}
       <div
         style={{
-          marginTop: 8,
+          border: "1px solid #ddd",
+          borderRadius: "4px",
+          overflow: "hidden",
+          backgroundColor: "white",
+          height: "600px", // Fixed container height
           display: "flex",
-          alignItems: "center",
-          gap: 12,
+          flexDirection: "column",
         }}
       >
-        {/* Reset sort button if user has sorted with the UI */}
-        {sortBy !== null && (
-          <button onClick={resetSort} style={{ fontWeight: "bold" }}>
-            Reset Sort
-          </button>
-        )}
-        <button onClick={() => gotoPage(page - 1)} disabled={page === 0}>
-          Prev
-        </button>
-        <span>
-          Page {page + 1} of {totalPages}
-        </span>
-        <button
-          onClick={() => gotoPage(page + 1)}
-          disabled={page >= totalPages - 1}
+        {/* Scrollable table container */}
+        <div
+          style={{
+            flex: 1,
+            overflow: "auto",
+          }}
         >
-          Next
-        </button>
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              tableLayout: "fixed", // Fixed layout for consistent column widths
+            }}
+          >
+            {/* Table header with sticky positioning */}
+            <thead>
+              <tr
+                style={{
+                  position: "sticky",
+                  top: 0,
+                  zIndex: 10,
+                  backgroundColor: "#f8f9fa",
+                }}
+              >
+                {/* Render clickable column headers with sort indicators */}
+                {columns.map((c, idx) => (
+                  <th
+                    key={c}
+                    style={{
+                      cursor: "pointer",
+                      userSelect: "none",
+                      padding: "12px 8px",
+                      backgroundColor: "#f8f9fa",
+                      border: "1px solid #dee2e6",
+                      borderTop: "none",
+                      fontWeight: "600",
+                      fontSize: "14px",
+                      color: "#495057",
+                      width: columnWidths[c] || "120px", // Set fixed width
+                      textAlign: "left",
+                      boxShadow: "0 2px 2px -1px rgba(0, 0, 0, 0.1)", // Shadow for sticky header
+                    }}
+                    onClick={() => handleHeaderClick(idx)}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <span>{c}</span>
+                      {/* Show sort direction arrow for active column */}
+                      {sortBy === idx && (
+                        <span style={{ color: "#007acc", fontSize: "12px" }}>
+                          {sortDir ? "▲" : "▼"}
+                        </span>
+                      )}
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+
+            {/* Table body with data rows */}
+            <tbody>
+              {pagedRows.map((row, i) => (
+                <tr
+                  key={i}
+                  style={{
+                    borderBottom: "1px solid #eee",
+                    backgroundColor: i % 2 === 0 ? "#ffffff" : "#f9f9f9", // Alternating row colors
+                    transition: "background-color 0.2s",
+                  }}
+                  onMouseEnter={(e) =>
+                    (e.currentTarget.style.backgroundColor = "#e3f2fd")
+                  }
+                  onMouseLeave={(e) =>
+                    (e.currentTarget.style.backgroundColor =
+                      i % 2 === 0 ? "#ffffff" : "#f9f9f9")
+                  }
+                >
+                  {row.map((cell, j) => (
+                    <td
+                      key={j}
+                      style={{
+                        padding: "8px",
+                        border: "1px solid #eee",
+                        borderTop: "none",
+                        fontSize: "13px",
+                        width: columnWidths[columns[j]] || "120px", // Match header width
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={cell.qText} // Show full text on hover
+                    >
+                      {cell.qText}{" "}
+                      {/* Display formatted text value from Qlik */}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
-      {/* UI Hint for sorting */}
-      <div style={{ fontSize: 12, marginTop: 4, color: "#888" }}>
-        <span>
-          Sorting follows Qlik property panel unless you click a column header.
-        </span>
+
+      {/* Pagination and sorting controls */}
+      <div
+        style={{
+          marginTop: 16,
+          padding: "12px 0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: 12,
+          borderTop: "1px solid #eee",
+        }}
+      >
+        {/* Left side - Reset sort button */}
+        <div>
+          {sortBy !== null && (
+            <button
+              onClick={resetSort}
+              style={{
+                fontWeight: "500",
+                padding: "6px 12px",
+                backgroundColor: "#6c757d",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontSize: "12px",
+              }}
+            >
+              Reset Sort
+            </button>
+          )}
+        </div>
+
+        {/* Center - Pagination controls */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <button
+            onClick={() => gotoPage(page - 1)}
+            disabled={page === 0}
+            style={{
+              padding: "6px 12px",
+              backgroundColor: page === 0 ? "#e9ecef" : "#007acc",
+              color: page === 0 ? "#6c757d" : "white",
+              border: "none",
+              borderRadius: "4px",
+              cursor: page === 0 ? "not-allowed" : "pointer",
+              fontSize: "12px",
+            }}
+          >
+            Previous
+          </button>
+
+          <span
+            style={{
+              fontWeight: "500",
+              fontSize: "14px",
+              color: "#495057",
+              margin: "0 8px",
+            }}
+          >
+            Page {page + 1} of {totalPages}
+          </span>
+
+          <button
+            onClick={() => gotoPage(page + 1)}
+            disabled={page >= totalPages - 1}
+            style={{
+              padding: "6px 12px",
+              backgroundColor: page >= totalPages - 1 ? "#e9ecef" : "#007acc",
+              color: page >= totalPages - 1 ? "#6c757d" : "white",
+              border: "none",
+              borderRadius: "4px",
+              cursor: page >= totalPages - 1 ? "not-allowed" : "pointer",
+              fontSize: "12px",
+            }}
+          >
+            Next
+          </button>
+        </div>
+
+        {/* Right side - Row count and info */}
+        <div
+          style={{
+            fontSize: 12,
+            color: "#6c757d",
+            textAlign: "right",
+          }}
+        >
+          <div>
+            Showing {pagedRows.length} of {displayRows.length} rows
+          </div>
+          <div style={{ fontSize: 11, marginTop: 2 }}>
+            Click column headers to sort
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -37,7 +37,7 @@ export default function supernova(galaxy) {
         }
         // Create and render new React root using WritebackTable
         element.__root = ReactDOM.createRoot(element);
-        element.__root.render(<WritebackTable layout={layout} pageSize={25} />);
+        element.__root.render(<WritebackTable layout={layout} pageSize={100} />);
         // Cleanup: unmount on component unmount or re-render
         return () => {
           if (element.__root) {

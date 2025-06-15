@@ -2,7 +2,7 @@ export default {
   qHyperCubeDef: {
     qDimensions: [],
     qMeasures: [],
-    qInitialDataFetch: [{ qWidth: 10, qHeight: 100 }],
+    qInitialDataFetch: [{ qWidth: 10, qHeight: 1000 }],
   },
   showTitles: true,
   title: "",
