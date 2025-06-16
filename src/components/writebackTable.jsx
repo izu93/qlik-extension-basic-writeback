@@ -17,6 +17,7 @@ import {
   getSelectionSummary,
 } from "../utils/selectionUtils";
 import { saveWritebackData, testSaveConnection } from "../utils/saveService";
+import { loadWritebackData, testReadConnection } from "../utils/readService";
 
 /**
  * WritebackTable: Enhanced with Writeback functionality - Defaults to Selection Mode
@@ -45,6 +46,7 @@ export default function WritebackTable({
   const [isSaving, setIsSaving] = useState(false);
   const [writebackMode, setWritebackMode] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null);
+  const [isLoadingWriteback, setIsLoadingWriteback] = useState(false);
 
   // Mode toggle state: always default to selection
   const [currentMode, setCurrentMode] = useState("selection");
@@ -103,6 +105,33 @@ export default function WritebackTable({
       setWritebackMode(true);
     }
   }, [writebackColumnsPresent.length]);
+
+  // Load existing writeback data on mount and when layout changes
+  useEffect(() => {
+    async function loadExistingWritebackData() {
+      if (writebackColumnsPresent.length > 0 && layout) {
+        setIsLoadingWriteback(true);
+
+        try {
+          const existingData = await loadWritebackData(layout, app);
+          if (existingData && Object.keys(existingData).length > 0) {
+            setEditedData(existingData);
+            console.log(
+              `Loaded ${
+                Object.keys(existingData).length
+              } writeback values from automation`
+            );
+          }
+        } catch (error) {
+          console.error("Failed to load existing writeback data:", error);
+        } finally {
+          setIsLoadingWriteback(false);
+        }
+      }
+    }
+
+    loadExistingWritebackData();
+  }, [layout?.qInfo?.qId, writebackColumnsPresent.length]); // Reload when app ID or writeback columns change
 
   if (!columns.length) {
     return (
@@ -613,7 +642,11 @@ export default function WritebackTable({
 
               {/* Writeback Status */}
               <span>
-                {hasUnsavedChanges ? (
+                {isLoadingWriteback ? (
+                  <span style={{ color: "#007acc" }}>
+                    Loading existing data...
+                  </span>
+                ) : hasUnsavedChanges ? (
                   <span style={{ color: "#dc3545", fontWeight: "500" }}>
                     <strong>{Object.keys(editedData).length}</strong> unsaved
                     changes
@@ -670,26 +703,38 @@ export default function WritebackTable({
             </span>
           )}
 
+          {isLoadingWriteback && (
+            <span style={{ fontSize: "12px", color: "#007acc" }}>
+              Loading writeback data...
+            </span>
+          )}
+
           {/* Edit Mode Controls */}
           {currentMode === "edit" && writebackColumnsPresent.length > 0 && (
             <>
               <button
                 onClick={saveAllChanges}
-                disabled={!hasUnsavedChanges || isSaving}
+                disabled={!hasUnsavedChanges || isSaving || isLoadingWriteback}
                 style={{
                   padding: "6px 12px",
                   backgroundColor:
-                    !hasUnsavedChanges || isSaving ? "#6c757d" : "#28a745",
+                    !hasUnsavedChanges || isSaving || isLoadingWriteback
+                      ? "#6c757d"
+                      : "#28a745",
                   color: "white",
                   border: "none",
                   borderRadius: "4px",
                   cursor:
-                    !hasUnsavedChanges || isSaving ? "not-allowed" : "pointer",
+                    !hasUnsavedChanges || isSaving || isLoadingWriteback
+                      ? "not-allowed"
+                      : "pointer",
                   fontSize: "12px",
                   fontWeight: "500",
                 }}
                 title={
-                  saveStatus?.success
+                  isLoadingWriteback
+                    ? "Loading existing writeback data..."
+                    : saveStatus?.success
                     ? `Last saved: ${saveStatus.fileName} (${saveStatus.changeCount} changes)`
                     : saveStatus && !saveStatus.success
                     ? `Save failed: ${saveStatus.message}`
@@ -700,7 +745,9 @@ export default function WritebackTable({
                     : "No changes to save"
                 }
               >
-                {isSaving
+                {isLoadingWriteback
+                  ? "Loading..."
+                  : isSaving
                   ? "Saving..."
                   : hasUnsavedChanges
                   ? `Save Changes (${Object.keys(editedData).length})`
@@ -709,7 +756,7 @@ export default function WritebackTable({
 
               <button
                 onClick={clearAllChanges}
-                disabled={!hasUnsavedChanges || isSaving}
+                disabled={!hasUnsavedChanges || isSaving || isLoadingWriteback}
                 style={{
                   padding: "6px 12px",
                   backgroundColor: "#dc3545",
@@ -717,7 +764,9 @@ export default function WritebackTable({
                   border: "none",
                   borderRadius: "4px",
                   cursor:
-                    !hasUnsavedChanges || isSaving ? "not-allowed" : "pointer",
+                    !hasUnsavedChanges || isSaving || isLoadingWriteback
+                      ? "not-allowed"
+                      : "pointer",
                   fontSize: "12px",
                 }}
               >

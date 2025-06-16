@@ -7,9 +7,21 @@ import ENV from "../config/env.js";
  */
 export async function saveWritebackData(editedData, layout, app) {
   try {
-    // Generate basic audit info
+    // Generate basic audit info - use stable app ID
     const timestamp = new Date().toISOString();
-    const appId = layout?.qInfo?.qId || "unknown-app";
+    let appId;
+
+    // Priority: Use app.id first (more stable), then layout.qInfo.qId as fallback
+    if (app && app.id) {
+      appId = app.id;
+    } else if (layout?.qInfo?.qId) {
+      appId = layout.qInfo.qId;
+    } else {
+      appId = "unknown-app";
+    }
+
+    console.log("Saving writeback data for appId:", appId);
+
     const fileName = `writeback_${appId}_${timestamp.replace(
       /[:.]/g,
       "-"
