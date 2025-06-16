@@ -3,5 +3,5 @@
 ## Usage
 
 ```js
-npm install basic-writeback
+npm install
 ```
