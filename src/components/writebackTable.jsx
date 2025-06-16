@@ -16,6 +16,7 @@ import {
   isColumnSelectable,
   getSelectionSummary,
 } from "../utils/selectionUtils";
+import { saveWritebackData, testSaveConnection } from "../utils/saveService";
 
 /**
  * WritebackTable: Enhanced with Writeback functionality - Defaults to Selection Mode
@@ -43,6 +44,7 @@ export default function WritebackTable({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [writebackMode, setWritebackMode] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null);
 
   // Mode toggle state: always default to selection
   const [currentMode, setCurrentMode] = useState("selection");
@@ -95,11 +97,10 @@ export default function WritebackTable({
     (col) => writebackConfig[col].view === "coach"
   );
 
-  // Auto-enable writeback mode if writeback columns are detected - but don't change mode
+  // Auto-enable writeback mode if writeback columns are detected
   useEffect(() => {
     if (writebackColumnsPresent.length > 0) {
       setWritebackMode(true);
-      // Don't change currentMode - always stay in selection unless user clicks Edit
     }
   }, [writebackColumnsPresent.length]);
 
@@ -130,11 +131,6 @@ export default function WritebackTable({
       </div>
     );
   }
-
-  // Layout effect to reduce flickering
-  useEffect(() => {
-    // Just let Qlik handle its own selection states, don't track them visually
-  }, [layout]);
 
   // Writeback functionality
   const getRowId = (row, index) => {
@@ -172,37 +168,36 @@ export default function WritebackTable({
   };
 
   const saveAllChanges = async () => {
-    if (!hasUnsavedChanges) {
+    if (!hasUnsavedChanges || Object.keys(editedData).length === 0) {
       return;
     }
 
     setIsSaving(true);
+    setSaveStatus(null);
 
     try {
-      console.log("Saving all changes:", editedData);
+      const result = await saveWritebackData(editedData, layout, app);
 
-      // Here you would integrate with your Qlik Automation
-      // For now, we'll simulate the save process
+      setSaveStatus({
+        success: true,
+        message: result.message,
+        fileName: result.fileName,
+        changeCount: result.changeCount,
+        timestamp: result.timestamp,
+      });
 
-      const saveData = {
-        timestamp: new Date().toISOString(),
-        changes: editedData,
-        appId: layout?.qInfo?.qId || "unknown",
-        user: "current_user", // You'd get this from Qlik session
-      };
-
-      // Simulate API call delay
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Store in localStorage as backup (from your GitHub implementation)
-      localStorage.setItem("writebackData", JSON.stringify(saveData));
-
-      // Show success message
-      console.log("Changes saved successfully!");
       setHasUnsavedChanges(false);
       setEditedData({});
     } catch (error) {
       console.error("Error saving changes:", error);
+
+      setSaveStatus({
+        success: false,
+        message: error.message,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Don't clear the edited data on error so user can retry
     } finally {
       setIsSaving(false);
     }
@@ -211,6 +206,7 @@ export default function WritebackTable({
   const clearAllChanges = () => {
     setEditedData({});
     setHasUnsavedChanges(false);
+    setSaveStatus(null);
   };
 
   // Handle manual mode changes (when user clicks mode buttons)
@@ -622,6 +618,14 @@ export default function WritebackTable({
                     <strong>{Object.keys(editedData).length}</strong> unsaved
                     changes
                   </span>
+                ) : saveStatus?.success ? (
+                  <span style={{ color: "#28a745" }}>
+                    Saved to {saveStatus.fileName}
+                  </span>
+                ) : saveStatus && !saveStatus.success ? (
+                  <span style={{ color: "#dc3545" }}>
+                    Save failed: {saveStatus.message}
+                  </span>
                 ) : (
                   <span style={{ color: "#28a745" }}>All changes saved</span>
                 )}
@@ -684,6 +688,17 @@ export default function WritebackTable({
                   fontSize: "12px",
                   fontWeight: "500",
                 }}
+                title={
+                  saveStatus?.success
+                    ? `Last saved: ${saveStatus.fileName} (${saveStatus.changeCount} changes)`
+                    : saveStatus && !saveStatus.success
+                    ? `Save failed: ${saveStatus.message}`
+                    : hasUnsavedChanges
+                    ? `Save ${
+                        Object.keys(editedData).length
+                      } changes to Qlik Automation`
+                    : "No changes to save"
+                }
               >
                 {isSaving
                   ? "Saving..."

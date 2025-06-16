@@ -15,3 +15,5 @@ test/integration/test-report
 
 basic-writeback-ext
 bundle-analysis.html
+
+src/config/env.js
