@@ -51,6 +51,10 @@ export default function WritebackTable({
   // Mode toggle state: always default to selection
   const [currentMode, setCurrentMode] = useState("selection");
 
+  // Adding new row state
+  const [addingRow, setAddingRow] = useState(false);
+  const [newRowData, setNewRowData] = useState({});
+
   const columns = getColumns(layout);
   const rows = getRows(layout);
 
@@ -539,6 +543,29 @@ export default function WritebackTable({
     setPage(Math.max(0, Math.min(totalPages - 1, newPage)));
   }
 
+  const handleSaveNewRow = () => {
+    // Simple validation (require swimmer/event/date/time at least)
+    if (
+      !newRowData["SWIMMER_NAME"] ||
+      !newRowData["EVENT"] ||
+      !newRowData["DATE"] ||
+      !newRowData["TIME"]
+    ) {
+      alert("Please fill out all required fields.");
+      return;
+    }
+    const newRowId = `new-${Date.now()}`;
+    columns.forEach((col) => {
+      setEditedData((prev) => ({
+        ...prev,
+        [`${newRowId}-${col}`]: newRowData[col] || "",
+      }));
+    });
+    setHasUnsavedChanges(true);
+    setAddingRow(false);
+    setNewRowData({});
+  };
+
   return (
     <div style={{ width: "100%", height: "100%" }}>
       {/* Mode Toggle & Controls */}
@@ -850,6 +877,23 @@ export default function WritebackTable({
           flexDirection: "column",
         }}
       >
+        <button
+          onClick={() => setAddingRow(true)}
+          disabled={addingRow}
+          style={{
+            margin: "12px 0",
+            background: "#16c784",
+            color: "#fff",
+            padding: "8px 18px",
+            border: "none",
+            borderRadius: "5px",
+            fontWeight: 600,
+            fontSize: "15px",
+            cursor: "pointer",
+          }}
+        >
+          + Add Entry
+        </button>
         <div style={{ flex: 1, overflow: "auto" }}>
           <table
             style={{
@@ -918,10 +962,99 @@ export default function WritebackTable({
                     </div>
                   </th>
                 ))}
+                {/* ACTIONS column header */}
+                <th
+                  style={{
+                    minWidth: 90,
+                    backgroundColor: "#f8f9fa",
+                    border: "1px solid #dee2e6",
+                    borderTop: "none",
+                    fontWeight: "600",
+                    fontSize: "14px",
+                    color: "#495057",
+                    textAlign: "left",
+                    boxShadow: "0 2px 2px -1px rgba(0, 0, 0, 0.1)",
+                  }}
+                >
+                  ACTIONS
+                </th>
               </tr>
             </thead>
 
             <tbody>
+              {addingRow && (
+                <tr style={{ background: "#e7f9f1" }}>
+                  {columns.map((col) => (
+                    <td key={col}>
+                      {["SWIMMER_NAME", "EVENT", "PHASE", "FOCUS"].includes(
+                        col
+                      ) ? (
+                        <select
+                          value={newRowData[col] || ""}
+                          onChange={(e) =>
+                            setNewRowData({
+                              ...newRowData,
+                              [col]: e.target.value,
+                            })
+                          }
+                          style={{ width: "100%" }}
+                        >
+                          <option value="">Select</option>
+                          {/* Example options - in a real app fetch unique values from Qlik if desired */}
+                          {getOptionsForColumn(col).map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
+                        </select>
+                      ) : col === "DATE" ? (
+                        <input
+                          type="date"
+                          value={newRowData[col] || ""}
+                          onChange={(e) =>
+                            setNewRowData({
+                              ...newRowData,
+                              [col]: e.target.value,
+                            })
+                          }
+                          style={{ width: "100%" }}
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          value={newRowData[col] || ""}
+                          onChange={(e) =>
+                            setNewRowData({
+                              ...newRowData,
+                              [col]: e.target.value,
+                            })
+                          }
+                          placeholder={col}
+                          style={{ width: "100%" }}
+                        />
+                      )}
+                    </td>
+                  ))}
+                  <td>
+                    <button
+                      onClick={handleSaveNewRow}
+                      style={{ color: "green" }}
+                    >
+                      💾
+                    </button>
+                    <button
+                      onClick={() => {
+                        setAddingRow(false);
+                        setNewRowData({});
+                      }}
+                      style={{ color: "red" }}
+                    >
+                      ✖️
+                    </button>
+                  </td>
+                </tr>
+              )}
+
               {pagedRows.map((row, i) => {
                 const actualRowIndex = pageStartIndex + i;
                 const backgroundColor = i % 2 === 0 ? "#ffffff" : "#f9f9f9";
@@ -1185,4 +1318,40 @@ export default function WritebackTable({
       </div>
     </div>
   );
+}
+
+function getOptionsForColumn(col) {
+  if (col === "SWIMMER_NAME")
+    return ["Sarah Johnson", "Alex Rodriguez", "Olivia Brown", "Michael Chen"];
+  if (col === "EVENT")
+    return [
+      "50m Freestyle",
+      "100m Freestyle",
+      "200m Freestyle",
+      "Butterfly",
+      "Backstroke",
+    ];
+  if (col === "PHASE")
+    return [
+      "Base Training",
+      "Peak",
+      "Competition",
+      "Build",
+      "SP",
+      "TE",
+      "CO",
+      "PE",
+      "ST",
+    ];
+  if (col === "FOCUS")
+    return [
+      "Technique",
+      "Race Prep",
+      "Stroke Count",
+      "Pacing Strategy",
+      "Underwaters",
+      "Speed",
+      "Pace Control",
+    ];
+  return [];
 }
