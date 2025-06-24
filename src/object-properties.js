@@ -10,4 +10,17 @@ export default {
   footnote: "",
   disableNavMenu: false,
   showDetails: false,
+
+  // Key Dimensions Configuration
+  keyDimensions: [],
+  keyGenerationStrategy: "concatenate",
+  keySeparator: "|",
+  showKeyInTable: false,
+  validateKeyUniqueness: true,
+
+  // Dynamic Writeback Configuration - starts empty
+  writebackConfig: {
+    enabled: false,
+    columns: [],
+  },
 };
