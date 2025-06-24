@@ -1,12 +1,61 @@
-// utils/saveService.js - Writeback Save Service
+// utils/saveService.js - Fixed CSV Save Service
 import ENV from "../config/env.js";
 
 /**
- * Save writeback data to Qlik Automation
- * Takes the edited data and sends it to your automation webhook
+ * Save writeback data to Qlik Automation with properly formatted CSV
  */
 export async function saveWritebackData(editedData, layout, app) {
   try {
+    console.log("Starting save operation with data:", editedData);
+
+    // Get current user information from Qlik app
+    let currentUser = "Unknown";
+    try {
+      if (app && app.global) {
+        const globalObject = await app.global;
+        if (
+          globalObject &&
+          typeof globalObject.getAuthenticatedUser === "function"
+        ) {
+          const userInfo = await globalObject.getAuthenticatedUser();
+          currentUser =
+            userInfo?.qUserId ||
+            userInfo?.qUserName ||
+            userInfo?.userId ||
+            "Unknown";
+        }
+      }
+
+      // Alternative method if the above doesn't work
+      if (
+        currentUser === "Unknown" &&
+        app &&
+        typeof app.getAppLayout === "function"
+      ) {
+        const appLayout = await app.getAppLayout();
+        currentUser =
+          appLayout?.qLocaleInfo?.qUserName ||
+          appLayout?.session?.user?.name ||
+          appLayout?.session?.user?.userId ||
+          "Unknown";
+      }
+
+      // Another alternative using session info
+      if (currentUser === "Unknown" && typeof window !== "undefined") {
+        // Try to get from browser context
+        currentUser =
+          window.qlik?.currentUser?.userId ||
+          window.qlik?.session?.user?.name ||
+          document.querySelector('meta[name="user"]')?.content ||
+          "Unknown";
+      }
+    } catch (userError) {
+      console.warn("Could not retrieve user information:", userError);
+      currentUser = "Unknown";
+    }
+
+    console.log("Current user identified as:", currentUser);
+
     // Generate basic audit info - use stable app ID
     const timestamp = new Date().toISOString();
     let appId;
@@ -20,22 +69,35 @@ export async function saveWritebackData(editedData, layout, app) {
       appId = "unknown-app";
     }
 
-    console.log("Saving writeback data for appId:", appId);
+    console.log(
+      "Saving writeback data for appId:",
+      appId,
+      "by user:",
+      currentUser
+    );
 
     const fileName = `writeback_${appId}_${timestamp.replace(
       /[:.]/g,
       "-"
     )}.csv`;
 
-    // Convert editedData to CSV format for your automation
-    const csvContent = generateCSV(editedData, layout, timestamp);
+    // Convert editedData to proper CSV format with real user
+    const csvContent = generateProperCSV(
+      editedData,
+      layout,
+      timestamp,
+      currentUser
+    );
+
+    console.log("Generated CSV content:", csvContent);
 
     // Send to your Qlik Automation
     const result = await sendToAutomation(
       csvContent,
       appId,
       timestamp,
-      fileName
+      fileName,
+      currentUser
     );
 
     return {
@@ -44,6 +106,7 @@ export async function saveWritebackData(editedData, layout, app) {
       fileName,
       timestamp,
       changeCount: Object.keys(editedData).length,
+      savedBy: currentUser,
     };
   } catch (error) {
     console.error("Save operation failed:", error);
@@ -52,125 +115,234 @@ export async function saveWritebackData(editedData, layout, app) {
 }
 
 /**
- * Generate CSV content from edited data with merged values in actual columns
+ * Generate properly structured CSV with base data + writeback changes
+ * Creates audit trail with real user information
  */
-function generateCSV(editedData, layout, timestamp) {
-  const columns =
-    layout?.qHyperCube?.qDimensionInfo?.map((d) => d.qFallbackTitle) || [];
-  const measures =
-    layout?.qHyperCube?.qMeasureInfo?.map((m) => m.qFallbackTitle) || [];
-  const allColumns = [...columns, ...measures];
-  const rows = layout?.qHyperCube?.qDataPages?.[0]?.qMatrix || [];
+function generateProperCSV(
+  editedData,
+  layout,
+  timestamp,
+  currentUser = "Unknown"
+) {
+  console.log("Generating CSV for editedData:", editedData);
+  console.log("Using user:", currentUser);
 
-  // Create a map of edited values by rowId and field for quick lookup
+  // Get base columns and rows from hypercube
+  const baseColumns = getBaseColumns(layout);
+  const baseRows = getBaseRows(layout);
+
+  console.log("Base columns:", baseColumns);
+  console.log("Base rows count:", baseRows.length);
+
+  // Get writeback configuration
+  const writebackConfig = layout?.writebackConfig || { columns: [] };
+  const writebackColumns = writebackConfig.columns || [];
+
+  console.log(
+    "Writeback columns:",
+    writebackColumns.map((c) => c.columnName)
+  );
+
+  // Create full column headers with versioning
+  const allHeaders = [
+    ...baseColumns,
+    ...writebackColumns.map((col) => col.columnName),
+    "WRITEBACK_TIMESTAMP",
+    "WRITEBACK_USER",
+    "VERSION",
+    "CHANGE_TYPE",
+    "AUDIT_ID",
+  ];
+
+  const csvRows = [allHeaders.join(",")];
+  console.log("CSV Headers:", allHeaders);
+
+  // Group edited values by row identifier
   const editedValuesByRow = {};
 
   Object.entries(editedData).forEach(([key, value]) => {
     const lastDashIndex = key.lastIndexOf("-");
-    const actualRowId = key.substring(0, lastDashIndex);
+    const rowId = key.substring(0, lastDashIndex);
     const fieldName = key.substring(lastDashIndex + 1);
 
-    if (!editedValuesByRow[actualRowId]) {
-      editedValuesByRow[actualRowId] = {};
+    if (!editedValuesByRow[rowId]) {
+      editedValuesByRow[rowId] = {};
     }
-    editedValuesByRow[actualRowId][fieldName] = value;
+    editedValuesByRow[rowId][fieldName] = value;
   });
 
-  // CSV Headers: include all table columns plus writeback audit info
-  const csvHeaders = [
-    ...allColumns,
-    "WRITEBACK_FIELD",
-    "WRITEBACK_VALUE",
-    "WRITEBACK_TIMESTAMP",
-    "WRITEBACK_USER",
-    "AUDIT_ID",
-  ];
+  console.log("Edited values by row:", editedValuesByRow);
 
-  const csvRows = [csvHeaders.join(",")];
+  // Generate version number (simple timestamp-based versioning)
+  const version = Math.floor(Date.now() / 1000); // Unix timestamp as version
 
-  // Process each edited field
-  Object.entries(editedData).forEach(([key, value]) => {
-    const lastDashIndex = key.lastIndexOf("-");
-    const actualRowId = key.substring(0, lastDashIndex);
-    const fieldName = key.substring(lastDashIndex + 1);
+  // Process each edited row - CREATE AUDIT TRAIL VERSION
+  Object.entries(editedValuesByRow).forEach(([rowId, rowEdits]) => {
+    console.log(`Processing row ${rowId} with edits:`, rowEdits);
 
-    // Find the corresponding row by reconstructing the rowId for each row
-    let foundRow = null;
+    // Find the corresponding base data row
+    const rowMatch = findMatchingRow(rowId, baseRows, baseColumns);
 
-    rows.forEach((row, index) => {
-      const uniqueParts = [];
+    if (rowMatch) {
+      console.log("Found matching row:", rowMatch.row);
 
-      if (row && row.length > 0) {
-        for (let i = 0; i < Math.min(3, row.length); i++) {
-          if (row[i] && row[i].qText) {
-            uniqueParts.push(row[i].qText);
-          }
-        }
-      }
-
-      uniqueParts.push(`row-${index}`);
-      const reconstructedRowId = uniqueParts.join("|");
-
-      if (reconstructedRowId === actualRowId) {
-        foundRow = row;
-      }
-    });
-
-    if (foundRow) {
+      // Create audit trail row with version tracking and real user
       const csvRow = [];
 
-      // Add all original column values, merging in edited values where they exist
-      allColumns.forEach((colName, colIndex) => {
-        let cellValue;
-
-        const rowEdits = editedValuesByRow[actualRowId];
-
-        if (rowEdits && rowEdits[colName]) {
-          // Use the edited value instead of original
-          cellValue = rowEdits[colName];
-        } else if (rowEdits && colName === fieldName) {
-          // Also check if the current field being processed matches this column
-          cellValue = value;
-        } else {
-          // Use original value
-          if (foundRow[colIndex] && foundRow[colIndex].qText !== undefined) {
-            cellValue = foundRow[colIndex].qText;
-          } else {
-            cellValue = "";
-          }
-        }
-
-        csvRow.push(`"${cellValue}"`);
+      // Add base column values
+      baseColumns.forEach((colName, colIndex) => {
+        const cellValue = rowMatch.row[colIndex];
+        const displayValue = cellValue ? cellValue.qText || "" : "";
+        csvRow.push(`"${displayValue}"`);
       });
 
-      // Add writeback audit information
-      csvRow.push(`"${fieldName}"`);
-      csvRow.push(`"${value}"`);
-      csvRow.push(`"${timestamp}"`);
-      csvRow.push(`"User"`);
-      csvRow.push(`"${Date.now()}_${Math.random().toString(36).substr(2, 9)}"`);
+      // Add ALL writeback column values for this row
+      writebackColumns.forEach((col) => {
+        const value = rowEdits[col.columnName] || col.defaultValue || "";
+        csvRow.push(`"${value}"`);
+      });
+
+      // Add audit columns with real user information
+      csvRow.push(`"${timestamp}"`); // WRITEBACK_TIMESTAMP
+      csvRow.push(`"${currentUser}"`); // WRITEBACK_USER (real user!)
+      csvRow.push(`"${version}"`); // VERSION (incremental)
+      csvRow.push(`"UPDATE"`); // CHANGE_TYPE
+      csvRow.push(`"${generateAuditId()}"`); // AUDIT_ID
 
       csvRows.push(csvRow.join(","));
     } else {
-      // Fallback: create a row with just the writeback data
-      const csvRow = new Array(allColumns.length).fill('""');
-      csvRow.push(`"${fieldName}"`);
-      csvRow.push(`"${value}"`);
+      console.log(`No matching row found for rowId: ${rowId}`);
+
+      // Create fallback row with real user information
+      const csvRow = [];
+
+      // Empty base columns
+      baseColumns.forEach(() => {
+        csvRow.push('""');
+      });
+
+      // Writeback columns with current edits
+      writebackColumns.forEach((col) => {
+        const value = rowEdits[col.columnName] || col.defaultValue || "";
+        csvRow.push(`"${value}"`);
+      });
+
+      // Audit columns with real user
       csvRow.push(`"${timestamp}"`);
-      csvRow.push(`"User"`);
-      csvRow.push(`"${Date.now()}_${Math.random().toString(36).substr(2, 9)}"`);
+      csvRow.push(`"${currentUser}"`); // Real user here too
+      csvRow.push(`"${version}"`);
+      csvRow.push(`"INSERT"`);
+      csvRow.push(`"${generateAuditId()}"`);
 
       csvRows.push(csvRow.join(","));
     }
   });
 
-  return csvRows.join("\n");
+  const finalCSV = csvRows.join("\n");
+  console.log("Final CSV with real user:", finalCSV);
+
+  return finalCSV;
+}
+
+/**
+ * Get base columns from hypercube layout
+ */
+function getBaseColumns(layout) {
+  if (
+    !layout?.qHyperCube ||
+    (!layout.qHyperCube.qDimensionInfo && !layout.qHyperCube.qMeasureInfo)
+  ) {
+    return [];
+  }
+
+  return [
+    ...(layout.qHyperCube.qDimensionInfo || []),
+    ...(layout.qHyperCube.qMeasureInfo || []),
+  ].map((f) => f.qFallbackTitle);
+}
+
+/**
+ * Get base rows from hypercube layout
+ */
+function getBaseRows(layout) {
+  return layout?.qHyperCube?.qDataPages?.[0]?.qMatrix || [];
+}
+
+/**
+ * Find matching row in base data using enhanced row ID logic
+ */
+function findMatchingRow(rowId, baseRows, baseColumns) {
+  console.log(`Looking for row with ID: ${rowId}`);
+
+  // Parse the row ID to extract key components
+  // Row ID format: "keypart1|keypart2|keypart3|row-N"
+  const parts = rowId.split("|");
+  const rowIndexPart = parts[parts.length - 1]; // "row-N"
+  const keyParts = parts.slice(0, -1); // ["keypart1", "keypart2", "keypart3"]
+
+  // Extract row index
+  const rowIndexMatch = rowIndexPart.match(/row-(\d+)/);
+  if (rowIndexMatch) {
+    const rowIndex = parseInt(rowIndexMatch[1]);
+
+    if (rowIndex >= 0 && rowIndex < baseRows.length) {
+      const row = baseRows[rowIndex];
+      console.log(`Found row at index ${rowIndex}:`, row);
+
+      // Verify the row matches the key parts
+      let isMatch = true;
+      for (let i = 0; i < Math.min(keyParts.length, 3); i++) {
+        if (row[i] && row[i].qText !== keyParts[i]) {
+          isMatch = false;
+          break;
+        }
+      }
+
+      if (isMatch) {
+        return { row, index: rowIndex };
+      }
+    }
+  }
+
+  // Fallback: try to find by key parts
+  for (let i = 0; i < baseRows.length; i++) {
+    const row = baseRows[i];
+    let matches = 0;
+
+    for (let j = 0; j < Math.min(keyParts.length, 3); j++) {
+      if (row[j] && row[j].qText === keyParts[j]) {
+        matches++;
+      }
+    }
+
+    if (matches >= 2) {
+      // At least 2 key parts match
+      console.log(`Found matching row by key parts at index ${i}:`, row);
+      return { row, index: i };
+    }
+  }
+
+  console.log("No matching row found");
+  return null;
+}
+
+/**
+ * Generate unique audit ID
+ */
+function generateAuditId() {
+  return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 /**
  * Send form data to Qlik Automation webhook
  */
-async function sendToAutomation(csvContent, appId, timestamp, fileName) {
+async function sendToAutomation(
+  csvContent,
+  appId,
+  timestamp,
+  fileName,
+  currentUser = "Unknown"
+) {
   if (
     !ENV.DB_SAVE_WEBHOOK_URL ||
     ENV.DB_SAVE_WEBHOOK_URL.includes("YOUR_TENANT")
@@ -180,12 +352,21 @@ async function sendToAutomation(csvContent, appId, timestamp, fileName) {
     );
   }
 
+  console.log("Sending to automation:", {
+    webhookUrl: ENV.DB_SAVE_WEBHOOK_URL,
+    appId,
+    fileName,
+    user: currentUser,
+    csvLength: csvContent.length,
+  });
+
   const formData = new FormData();
   formData.append("csvContent", csvContent);
   formData.append("appId", appId);
   formData.append("timestamp", timestamp);
   formData.append("userAgent", navigator.userAgent);
   formData.append("fileName", fileName);
+  formData.append("currentUser", currentUser); // Send user info to automation
 
   const requestOptions = {
     method: "POST",
@@ -201,7 +382,11 @@ async function sendToAutomation(csvContent, appId, timestamp, fileName) {
   const response = await fetch(ENV.DB_SAVE_WEBHOOK_URL, requestOptions);
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    const errorText = await response.text();
+    console.error("Automation response error:", errorText);
+    throw new Error(
+      `HTTP ${response.status}: ${response.statusText} - ${errorText}`
+    );
   }
 
   let responseData;
@@ -211,6 +396,7 @@ async function sendToAutomation(csvContent, appId, timestamp, fileName) {
     responseData = { success: true, message: await response.text() };
   }
 
+  console.log("Automation response:", responseData);
   return responseData;
 }
 
