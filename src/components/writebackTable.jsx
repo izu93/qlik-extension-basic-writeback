@@ -792,19 +792,8 @@ export default function WritebackTable({
       return "200px"; // Default width for writeback columns
     }
 
-    // Default widths for base columns
-    const columnName = baseColumns[columnIndex] || "";
-    const defaultWidths = {
-      DATE: "120px",
-      EVENT: "140px",
-      TIME: "100px",
-      TARGET: "100px",
-      DIFF: "100px",
-      PHASE: "120px",
-      FOCUS: "140px",
-    };
-
-    return defaultWidths[columnName] || "120px";
+    // Default width for all base columns (no hardcoded column names)
+    return "120px";
   };
 
   function handleHeaderClick(idx) {
@@ -1239,11 +1228,18 @@ export default function WritebackTable({
               >
                 {columns.map((c, idx) => {
                   const isWriteback = isWritebackColumn(idx);
-                  const isKeyDim = !isWriteback && isKeyDimension(c, layout);
+
+                  // For key dimension check, use the actual column name
+                  let columnName = c;
+                  if (isWriteback) {
+                    columnName = getWritebackColumnName(idx, layout);
+                  }
+
+                  const isKeyDim =
+                    !isWriteback && isKeyDimension(columnName, layout);
 
                   let config = null;
                   if (isWriteback) {
-                    const columnName = getWritebackColumnName(idx, layout);
                     config = writebackColumnMap.get(columnName);
                   }
 
@@ -1274,9 +1270,7 @@ export default function WritebackTable({
                         }}
                       >
                         <span>
-                          {isWriteback
-                            ? getWritebackColumnName(idx, layout)
-                            : c}
+                          {isWriteback ? columnName : c}
                           {isKeyDim && (
                             <span
                               style={{
@@ -1369,6 +1363,14 @@ export default function WritebackTable({
 
                       const rowId = getRowId(row, actualRowIndex);
 
+                      // Get proper column name for key dimension check
+                      let cellColumnName = null;
+                      if (isWriteback) {
+                        cellColumnName = getWritebackColumnName(j, layout);
+                      } else {
+                        cellColumnName = baseColumns[j];
+                      }
+
                       let cellContent;
                       if (isWriteback) {
                         const columnName = getWritebackColumnName(j, layout);
@@ -1449,7 +1451,8 @@ export default function WritebackTable({
                                   ? "#f8f9fa"
                                   : "#fff8e1"
                                 : !isWriteback &&
-                                  isKeyDimension(baseColumns[j], layout)
+                                  cellColumnName &&
+                                  isKeyDimension(cellColumnName, layout)
                                 ? "#f3e5f5"
                                 : currentMode === "selection" &&
                                   isDynamicColumnSelectable(j, layout) &&
@@ -1473,8 +1476,9 @@ export default function WritebackTable({
                                     : ""
                                 }`
                               : !isWriteback &&
-                                isKeyDimension(baseColumns[j], layout)
-                              ? `${baseColumns[j]} (Key Dimension)`
+                                cellColumnName &&
+                                isKeyDimension(cellColumnName, layout)
+                              ? `${cellColumnName} (Key Dimension)`
                               : cell.qText
                           }
                           onClick={() => onCellClick(j, cell, row, i)}
