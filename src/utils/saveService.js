@@ -24,7 +24,7 @@ export async function saveWritebackData(editedData, layout, app) {
     console.log("Current user:", currentUser);
 
     // Generate audit info
-    const timestamp = new Date().toISOString();
+    const timestamp = generateETTimestamp();
     const appId = getConsistentAppId(app, layout);
     const sessionId = getOrCreateSessionId();
 
@@ -61,7 +61,7 @@ export async function saveWritebackData(editedData, layout, app) {
     return {
       success: true,
       message: `Successfully saved ${dbRecords.length} records to database`,
-      fileName: null,
+      fileName: "Clean Database",
       timestamp,
       changeCount: dbRecords.length,
       savedBy: currentUser,
@@ -74,7 +74,7 @@ export async function saveWritebackData(editedData, layout, app) {
 }
 
 /**
- * Convert edited data to database record format - DYNAMIC VERSION
+ * UPDATED: Convert edited data with improved user/time handling
  */
 function convertToDbRecords(
   editedData,
@@ -84,17 +84,15 @@ function convertToDbRecords(
   appId,
   sessionId
 ) {
-  console.log("Converting edited data to database records (DYNAMIC)...");
+  console.log("Converting edited data to database records (CLEAN SCHEMA)...");
 
   const baseRows = getBaseRows(layout);
   const baseColumns = getBaseColumns(layout);
   const dbRecords = [];
 
-  // Get the model structure dynamically
   const modelStructure = analyzeModelStructure(layout);
-  console.log("Detected model structure:", modelStructure);
+  console.log("Detected clean model structure:", modelStructure);
 
-  // Group edited data by primary key (first dimension)
   const editsByPrimaryKey = groupEditsByPrimaryKey(
     editedData,
     baseRows,
@@ -104,14 +102,12 @@ function convertToDbRecords(
 
   console.log("Edits grouped by primary key:", Object.keys(editsByPrimaryKey));
 
-  // Generate version number
-  const version = Math.floor(Date.now() / 1000);
+  // Generate simple version number
+  const version = generateSimpleVersion();
 
-  // Create database record for each edited entity
   Object.entries(editsByPrimaryKey).forEach(([primaryKey, edits]) => {
     console.log(`Processing ${primaryKey}:`, edits);
 
-    // Find the source row data
     const sourceRow = findRowByPrimaryKey(
       baseRows,
       baseColumns,
@@ -124,8 +120,7 @@ function convertToDbRecords(
       return;
     }
 
-    // Create database record DYNAMICALLY
-    const dbRecord = createDynamicDbRecord(
+    const dbRecord = createCleanDbRecord(
       sourceRow,
       baseColumns,
       modelStructure,
@@ -139,7 +134,7 @@ function convertToDbRecords(
     );
 
     dbRecords.push(dbRecord);
-    console.log(`Created dynamic DB record for ${primaryKey}:`, dbRecord);
+    console.log(`Created clean DB record for ${primaryKey}:`, dbRecord);
   });
 
   return dbRecords;
@@ -147,7 +142,6 @@ function convertToDbRecords(
 
 /**
  * UPDATED: Get writeback fields dynamically from extension configuration
- * This replaces the hardcoded array
  */
 function getWritebackFieldsFromConfig(layout) {
   const writebackConfig = layout?.writebackConfig;
@@ -163,20 +157,20 @@ function getWritebackFieldsFromConfig(layout) {
     return convertToDbColumnName(column.columnName);
   });
 
-  console.log("Dynamic writeback fields from config:", writebackFields);
+  console.log("✅ Dynamic writeback fields from config:", writebackFields);
   return writebackFields;
 }
 
 /**
- * UPDATED: Analyze model structure - DYNAMIC writeback fields
+ * UPDATED: Analyze model structure - Clean schema focused
  */
 function analyzeModelStructure(layout) {
   const dimensions = layout.qHyperCube?.qDimensionInfo || [];
 
   const structure = {
     primaryKey: null,
-    keyDimensions: [], // ONLY dimension fields (key business identifiers)
-    writebackFields: getWritebackFieldsFromConfig(layout), // DYNAMIC!
+    keyDimensions: [], // ONLY the first dimension (primary key)
+    writebackFields: getWritebackFieldsFromConfig(layout),
     auditFields: [
       "created_by",
       "modified_by",
@@ -195,19 +189,18 @@ function analyzeModelStructure(layout) {
       dbColumn: convertToDbColumnName(dimensions[0].qFallbackTitle),
       index: 0,
     };
-  }
 
-  // ONLY dimensions (key identifiers) - NO measures
-  dimensions.forEach((dimension, index) => {
+    // ONLY include the primary key dimension (accountid)
     structure.keyDimensions.push({
-      name: dimension.qFallbackTitle,
-      dbColumn: convertToDbColumnName(dimension.qFallbackTitle),
-      index: index,
+      name: dimensions[0].qFallbackTitle,
+      dbColumn: convertToDbColumnName(dimensions[0].qFallbackTitle),
+      index: 0,
       type: "dimension",
     });
-  });
+  }
 
-  console.log("Dynamic model structure:", {
+  console.log("🏗️ Clean model structure:", {
+    primaryKey: structure.primaryKey?.name,
     keyDimensions: structure.keyDimensions.length,
     writebackFields: structure.writebackFields.length,
     auditFields: structure.auditFields.length,
@@ -219,7 +212,6 @@ function analyzeModelStructure(layout) {
 
 /**
  * Generate all possible UI field name variations from database field name
- * This makes the extension work with any naming convention
  */
 function generateUIFieldVariations(dbFieldName) {
   const variations = [];
@@ -275,10 +267,9 @@ function fuzzyMatchFields(uiFieldName, dbFieldName) {
 }
 
 /**
- * UPDATED: Create database record - FULLY DYNAMIC FIELD MAPPING
- * No hardcoded field names - uses naming convention
+ * UPDATED: Create clean database record with improved user/time handling
  */
-function createDynamicDbRecord(
+function createCleanDbRecord(
   sourceRow,
   baseColumns,
   modelStructure,
@@ -290,13 +281,13 @@ function createDynamicDbRecord(
   version,
   primaryKey
 ) {
-  console.log("=== CREATE DB RECORD DEBUG ===");
+  console.log("=== CREATE CLEAN DB RECORD ===");
   console.log("Edits received:", edits);
   console.log("Writeback fields expected:", modelStructure.writebackFields);
 
   const dbRecord = {};
 
-  // Add ONLY key dimension fields (no measures)
+  // Add ONLY the primary key dimension (accountid)
   modelStructure.keyDimensions.forEach((dimension) => {
     const value = extractValueFromRow(
       sourceRow,
@@ -306,55 +297,152 @@ function createDynamicDbRecord(
     dbRecord[dimension.dbColumn] = value;
   });
 
-  // Add writeback fields - DYNAMIC MAPPING with naming convention
+  // Add writeback fields with dynamic mapping
   modelStructure.writebackFields.forEach((dbFieldName) => {
     let editValue = "";
 
-    // DYNAMIC: Generate all possible UI field name variations
     const possibleUINames = generateUIFieldVariations(dbFieldName);
 
     console.log(`Looking for edit value for DB field "${dbFieldName}"`);
     console.log(`Possible UI names:`, possibleUINames);
 
-    // Find matching edit value from any possible UI name
     for (const uiName of possibleUINames) {
       if (edits.hasOwnProperty(uiName)) {
         editValue = edits[uiName];
         console.log(
-          `Found mapping: "${uiName}" → "${dbFieldName}" = "${editValue}"`
+          `✅ Found mapping: "${uiName}" → "${dbFieldName}" = "${editValue}"`
         );
         break;
       }
     }
 
-    // If still no match, try fuzzy matching as fallback
     if (!editValue) {
       Object.keys(edits).forEach((editKey) => {
         if (fuzzyMatchFields(editKey, dbFieldName)) {
           editValue = edits[editKey];
           console.log(
-            `Fuzzy match: "${editKey}" → "${dbFieldName}" = "${editValue}"`
+            `🔍 Fuzzy match: "${editKey}" → "${dbFieldName}" = "${editValue}"`
           );
         }
       });
     }
 
-    dbRecord[dbFieldName] = editValue;
-    console.log(`Final mapping: ${dbFieldName} = "${editValue}"`);
+    dbRecord[dbFieldName] = editValue || null;
   });
 
-  // Add audit fields
+  // Add clean audit fields
+  const etTimestamp = generateETTimestamp();
+  const simpleVersion = generateSimpleVersion();
+
   dbRecord.created_by = currentUser;
   dbRecord.modified_by = currentUser;
-  dbRecord.created_at = timestamp;
-  dbRecord.modified_at = timestamp;
-  dbRecord.version = version;
+  dbRecord.created_at = etTimestamp;
+  dbRecord.modified_at = etTimestamp;
+  dbRecord.version = simpleVersion;
   dbRecord.session_id = sessionId;
   dbRecord.app_id = appId;
 
-  console.log("=== FINAL DB RECORD ===");
+  console.log("=== FINAL CLEAN DB RECORD ===");
   console.log(dbRecord);
   return dbRecord;
+}
+
+/**
+ * Get current Qlik user - IMPROVED for readable names
+ */
+async function getCurrentQlikUser(app) {
+  console.log("🔍 Getting current user...");
+
+  try {
+    if (app && typeof app.getAppLayout === "function") {
+      const appLayout = await app.getAppLayout();
+      let user = appLayout?.owner;
+
+      if (user && typeof user === "string") {
+        // Clean up user name
+        if (user.includes("\\")) {
+          user = user.split("\\").pop();
+        }
+
+        // Convert auth0 ID to readable format
+        if (user.startsWith("auth0|")) {
+          const shortId = user.substring(6, 14);
+          user = `user_${shortId}`;
+        }
+
+        // If it's an email, extract the username part
+        if (user.includes("@")) {
+          user = user.split("@")[0];
+        }
+
+        console.log("✅ Processed user name:", user);
+        return user;
+      }
+    }
+
+    // Fallback: Generate session-based user
+    let sessionUser = sessionStorage.getItem("qlik_user_id");
+    if (!sessionUser) {
+      sessionUser = `user_${Date.now().toString().slice(-6)}`;
+      sessionStorage.setItem("qlik_user_id", sessionUser);
+    }
+
+    console.log("📝 Using session user:", sessionUser);
+    return sessionUser;
+  } catch (error) {
+    console.error("Error getting user:", error);
+    return `user_${Date.now().toString().slice(-6)}`;
+  }
+}
+
+/**
+ * Generate ET timestamp
+ */
+function generateETTimestamp() {
+  const now = new Date();
+
+  // Convert to Eastern Time
+  const etTime = new Date(
+    now.toLocaleString("en-US", {
+      timeZone: "America/New_York",
+    })
+  );
+
+  // Format as YYYY-MM-DD HH:MM:SS
+  const year = etTime.getFullYear();
+  const month = (etTime.getMonth() + 1).toString().padStart(2, "0");
+  const day = etTime.getDate().toString().padStart(2, "0");
+  const hours = etTime.getHours().toString().padStart(2, "0");
+  const minutes = etTime.getMinutes().toString().padStart(2, "0");
+  const seconds = etTime.getSeconds().toString().padStart(2, "0");
+
+  const formatted = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+  console.log("🕐 Generated ET timestamp:", formatted);
+  return formatted;
+}
+
+/**
+ * FIXED: Generate smaller version number that fits in PostgreSQL INTEGER
+ */
+function generateSimpleVersion() {
+  const now = new Date();
+  const etTime = new Date(
+    now.toLocaleString("en-US", {
+      timeZone: "America/New_York",
+    })
+  );
+
+  // Use smaller format: MMDDHHMM (8 digits max, fits in INTEGER)
+  const version = parseInt(
+    (etTime.getMonth() + 1).toString().padStart(2, "0") + // MM (01-12)
+      etTime.getDate().toString().padStart(2, "0") + // DD (01-31)
+      etTime.getHours().toString().padStart(2, "0") + // HH (00-23)
+      etTime.getMinutes().toString().padStart(2, "0") // MM (00-59)
+  );
+
+  console.log("📊 Generated smaller version (MMDDHHMM):", version);
+  return version;
 }
 
 /**
@@ -385,7 +473,6 @@ function groupEditsByPrimaryKey(
   }
 
   Object.entries(editedData).forEach(([key, value]) => {
-    // Extract primary key from edit key
     const primaryKey = extractPrimaryKeyFromEditKey(
       key,
       baseRows,
@@ -398,7 +485,6 @@ function groupEditsByPrimaryKey(
         grouped[primaryKey] = {};
       }
 
-      // Extract field name from edit key
       const fieldName = extractFieldNameFromEditKey(key);
       grouped[primaryKey][fieldName] = value;
     }
@@ -416,9 +502,8 @@ function extractPrimaryKeyFromEditKey(
   baseColumns,
   modelStructure
 ) {
-  // Handle composite keys (key1::key2::field) or simple keys (key-field)
   if (editKey.includes("::")) {
-    return editKey.split("::")[0]; // First part is primary key
+    return editKey.split("::")[0];
   } else if (editKey.includes("-")) {
     const lastDashIndex = editKey.lastIndexOf("-");
     return editKey.substring(0, lastDashIndex);
@@ -433,7 +518,7 @@ function extractPrimaryKeyFromEditKey(
 function extractFieldNameFromEditKey(editKey) {
   if (editKey.includes("::")) {
     const parts = editKey.split("::");
-    return parts[parts.length - 1]; // Last part is field name
+    return parts[parts.length - 1];
   } else if (editKey.includes("-")) {
     const lastDashIndex = editKey.lastIndexOf("-");
     return editKey.substring(lastDashIndex + 1);
@@ -451,101 +536,44 @@ function findRowByPrimaryKey(
   primaryKey,
   modelStructure
 ) {
-  console.log(`Looking for row with primaryKey: ${primaryKey}`);
-  console.log(`Base rows count: ${baseRows.length}`);
-  console.log(`Base columns:`, baseColumns);
+  console.log(`🔍 Looking for row with primaryKey: ${primaryKey}`);
 
-  // Parse the primaryKey (row ID) to extract key components
-  // Row ID format: "aa16889|row-0" or "keypart1|keypart2|row-N"
   const parts = primaryKey.split("|");
-  const rowIndexPart = parts[parts.length - 1]; // "row-N"
-  const keyParts = parts.slice(0, -1); // ["aa16889"] or ["keypart1", "keypart2"]
+  const rowIndexPart = parts[parts.length - 1];
+  const keyParts = parts.slice(0, -1);
 
-  console.log(`Primary key parts:`, parts);
-  console.log(`Row index part: ${rowIndexPart}`);
-  console.log(`Key parts:`, keyParts);
-
-  // Method 1: Extract row index and verify with AccountID
   const rowIndexMatch = rowIndexPart.match(/row-(\d+)/);
   if (rowIndexMatch) {
     const rowIndex = parseInt(rowIndexMatch[1]);
-    console.log(`Extracted row index: ${rowIndex}`);
 
     if (rowIndex >= 0 && rowIndex < baseRows.length) {
       const row = baseRows[rowIndex];
-      console.log(`Found row at index ${rowIndex}:`, row);
 
-      // Verify the row matches the key parts by checking AccountID (first dimension)
       if (row[0] && row[0].qText && keyParts.length > 0) {
-        const firstKey = keyParts[0]; // Should be AccountID
+        const firstKey = keyParts[0];
         const actualValue = row[0].qText;
 
-        console.log(`Comparing key: "${firstKey}" vs actual: "${actualValue}"`);
-
         if (actualValue === firstKey) {
-          console.log(`Row matched successfully by index + AccountID!`);
+          console.log(`✅ Row matched successfully!`);
           return row;
-        } else {
-          console.log(
-            `Key mismatch: expected "${firstKey}", got "${actualValue}"`
-          );
         }
-      } else {
-        console.log(`No key verification possible, using row by index anyway`);
-        return row;
       }
-    } else {
-      console.log(
-        `Row index ${rowIndex} out of bounds (max: ${baseRows.length - 1})`
-      );
+      return row;
     }
-  } else {
-    console.log(`Could not extract row index from: ${rowIndexPart}`);
   }
 
-  // Method 2: Fallback - search by AccountID in key parts
-  console.log(`Fallback: searching by AccountID in key parts...`);
   if (keyParts.length > 0) {
-    const searchKey = keyParts[0]; // AccountID should be first
-
+    const searchKey = keyParts[0];
     for (let i = 0; i < baseRows.length; i++) {
       const row = baseRows[i];
       if (row[0] && row[0].qText === searchKey) {
-        console.log(
-          `Found matching row by AccountID "${searchKey}" at index ${i}:`,
-          row
-        );
+        console.log(`✅ Found matching row by search key`);
         return row;
       }
     }
-
-    console.log(`No row found with AccountID: ${searchKey}`);
   }
 
-  // Method 3: Last resort - try to match with primary key field directly
-  if (modelStructure.primaryKey) {
-    const primaryKeyIndex = modelStructure.primaryKey.index;
-    console.log(
-      `Last resort: searching by primary key index ${primaryKeyIndex}...`
-    );
-
-    // Try to extract just the AccountID from the complex key
-    let searchValue = primaryKey;
-    if (keyParts.length > 0) {
-      searchValue = keyParts[0]; // First part should be AccountID
-    }
-
-    const foundRow = baseRows.find((row) => {
-      return row[primaryKeyIndex] && row[primaryKeyIndex].qText === searchValue;
-    });
-
-    if (foundRow) {
-      console.log(`Found row by primary key field match:`, foundRow);
-      return foundRow;
-    }
-  }
-
-  console.log(`No matching row found for primaryKey: ${primaryKey}`);
+  console.log(`❌ No matching row found for primaryKey: ${primaryKey}`);
   return null;
 }
 
@@ -564,32 +592,53 @@ function extractValueFromRow(row, index, type) {
 }
 
 /**
- * Generate SQL dynamically based on record structure
+ * UPDATED: Generate clean SQL for new schema with UPSERT
  */
-function generateDynamicSQL(record, modelStructure) {
-  // Get all columns from the record
-  const columns = Object.keys(record);
-  const values = columns.map((column) => {
-    const value = record[column];
+function generateCleanSQL(record, modelStructure) {
+  // Only include essential columns
+  const essentialColumns = [
+    ...modelStructure.keyDimensions.map((d) => d.dbColumn),
+    ...modelStructure.writebackFields,
+    ...modelStructure.auditFields,
+  ];
 
-    // Handle different data types
+  // Filter record to only include essential columns
+  const cleanRecord = {};
+  essentialColumns.forEach((column) => {
+    if (record.hasOwnProperty(column)) {
+      cleanRecord[column] = record[column];
+    }
+  });
+
+  const columns = Object.keys(cleanRecord);
+  const values = columns.map((column) => {
+    const value = cleanRecord[column];
+
     if (value === null || value === undefined) {
       return "NULL";
     } else if (typeof value === "number") {
       return value;
     } else if (typeof value === "string") {
-      return `'${value.replace(/'/g, "''")}'`; // Escape single quotes
+      return `'${value.replace(/'/g, "''")}'`;
     } else {
       return `'${String(value).replace(/'/g, "''")}'`;
     }
   });
 
+  // Use UPSERT for clean data handling
   const sql = `
 INSERT INTO writeback_data (
   ${columns.join(",\n  ")}
 ) VALUES (
   ${values.join(",\n  ")}
-);`;
+)
+ON CONFLICT (accountid, session_id) 
+DO UPDATE SET
+  model_feedback = EXCLUDED.model_feedback,
+  comments = EXCLUDED.comments,
+  modified_by = EXCLUDED.modified_by,
+  modified_at = EXCLUDED.modified_at,
+  version = EXCLUDED.version;`;
 
   return sql;
 }
@@ -607,7 +656,7 @@ async function sendToPostgreSQLAutomation(dbRecords, layout, context) {
     );
   }
 
-  console.log("Sending to PostgreSQL automation (DYNAMIC):", {
+  console.log("Sending to PostgreSQL automation (CLEAN SCHEMA):", {
     webhookUrl: ENV.DB_SAVE_WEBHOOK_URL,
     recordCount: dbRecords.length,
     user: context.user,
@@ -616,8 +665,8 @@ async function sendToPostgreSQLAutomation(dbRecords, layout, context) {
   // Analyze model structure for SQL generation
   const modelStructure = analyzeModelStructure(layout);
 
-  // Generate SQL dynamically
-  const sql = generateDynamicSQL(dbRecords[0], modelStructure);
+  // Generate clean SQL with UPSERT
+  const sql = generateCleanSQL(dbRecords[0], modelStructure);
 
   const payload = {
     query: sql,
@@ -625,7 +674,7 @@ async function sendToPostgreSQLAutomation(dbRecords, layout, context) {
     model_info: {
       primary_key: modelStructure.primaryKey?.name,
       key_dimensions: modelStructure.keyDimensions.map((d) => d.name),
-      writeback_fields: modelStructure.writebackFields, // 🎯 DYNAMIC
+      writeback_fields: modelStructure.writebackFields,
       total_columns:
         modelStructure.keyDimensions.length +
         modelStructure.writebackFields.length +
@@ -633,7 +682,7 @@ async function sendToPostgreSQLAutomation(dbRecords, layout, context) {
     },
   };
 
-  console.log("Dynamic database payload:", JSON.stringify(payload, null, 2));
+  console.log("🎯 Clean database payload:", JSON.stringify(payload, null, 2));
 
   const requestOptions = {
     method: "POST",
@@ -717,31 +766,6 @@ function getBaseColumns(layout) {
  */
 function getBaseRows(layout) {
   return layout?.qHyperCube?.qDataPages?.[0]?.qMatrix || [];
-}
-
-/**
- * Get current Qlik user
- */
-async function getCurrentQlikUser(app) {
-  console.log("Getting current user...");
-
-  try {
-    if (app && typeof app.getAppLayout === "function") {
-      const appLayout = await app.getAppLayout();
-      const owner = appLayout?.owner;
-      if (owner && typeof owner === "string") {
-        if (owner.includes("\\")) {
-          return owner.split("\\").pop();
-        }
-        return owner;
-      }
-    }
-
-    return "Unknown User";
-  } catch (error) {
-    console.error("Error getting user:", error);
-    return "Unknown User";
-  }
 }
 
 /**
