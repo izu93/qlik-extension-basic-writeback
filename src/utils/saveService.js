@@ -1,613 +1,698 @@
-// utils/saveService.js - QlikCloud Auth0 User Resolution
+// utils/saveService.js - Dynamic PostgreSQL Database Save Service
+// AUTO-DETECTS fields from Qlik model + adds writeback and audit columns
 import ENV from "../config/env.js";
 
 /**
- * Get current user from QlikCloud - Handles Auth0 subject ID to readable name conversion
- */
-async function getCurrentQlikUser(app) {
-  let currentUser = "Unknown";
-
-  try {
-    console.log("🔍 Starting QlikCloud Auth0-aware user detection...");
-
-    // Step 1: Get the Auth0 subject ID using various methods
-    const auth0Subject = await getAuth0Subject(app);
-    console.log("🔑 Auth0 Subject ID:", auth0Subject);
-
-    if (auth0Subject && auth0Subject !== "Unknown") {
-      // Step 2: Convert Auth0 subject to readable username via QlikCloud API
-      const readableName = await convertAuth0SubjectToReadableName(
-        auth0Subject
-      );
-      if (readableName && readableName !== "Unknown") {
-        console.log(
-          "✅ Successfully converted to readable name:",
-          readableName
-        );
-        return readableName;
-      }
-
-      // Fallback: If API call fails, try to extract username from email if possible
-      const fallbackName = await extractUsernameFromAuth0Subject(auth0Subject);
-      if (fallbackName && fallbackName !== "Unknown") {
-        console.log("🔄 Using fallback extracted name:", fallbackName);
-        return fallbackName;
-      }
-
-      // Last resort: Use the Auth0 subject ID itself
-      console.log(
-        "⚠️ Using Auth0 subject as username (no conversion available)"
-      );
-      return auth0Subject;
-    }
-
-    console.log("❌ No Auth0 subject found, trying other methods...");
-
-    // Step 3: Fallback to other detection methods
-    return await fallbackUserDetection(app);
-  } catch (error) {
-    console.error("💥 Error in Auth0 user detection:", error);
-    return "Unknown";
-  }
-}
-
-/**
- * Get Auth0 subject ID from various sources
- */
-async function getAuth0Subject(app) {
-  console.log("🔍 Searching for Auth0 subject ID...");
-
-  // Method 1: Try OSUser() expression if available
-  if (app && typeof app.evaluate === "function") {
-    try {
-      console.log("📊 Trying OSUser() expression...");
-      const osUserResult = await app.evaluate("OSUser()");
-      console.log("OSUser() result:", osUserResult);
-
-      if (osUserResult && typeof osUserResult === "string") {
-        // Parse OSUser() result which typically looks like:
-        // "UserDirectory=QLIKCLOUD; UserId=auth0|fcec2f3c14290076943546b83871cef1f4a400cb81c7e123d2511d46b9302378"
-        const subjectMatch = osUserResult.match(/UserId=([^;]+)/);
-        if (subjectMatch) {
-          const subject = subjectMatch[1].trim();
-          console.log("✅ Extracted Auth0 subject from OSUser():", subject);
-          return subject;
-        }
-
-        // Sometimes it's just the subject directly
-        if (osUserResult.startsWith("auth0|")) {
-          console.log(
-            "✅ Found direct Auth0 subject from OSUser():",
-            osUserResult
-          );
-          return osUserResult;
-        }
-      }
-    } catch (osUserError) {
-      console.log("❌ OSUser() evaluation failed:", osUserError.message);
-    }
-  }
-
-  // Method 2: Try app layout owner field (might contain Auth0 subject)
-  if (app && typeof app.getAppLayout === "function") {
-    try {
-      console.log("📱 Checking app layout for Auth0 subject...");
-      const appLayout = await app.getAppLayout();
-
-      const possibleSubjects = [
-        appLayout?.owner,
-        appLayout?.qMeta?.createdBy,
-        appLayout?.qMeta?.modifiedBy,
-        appLayout?.createdBy,
-        appLayout?.userId,
-      ];
-
-      for (const field of possibleSubjects) {
-        if (field && typeof field === "string" && field.includes("auth0|")) {
-          console.log("✅ Found Auth0 subject in app layout:", field);
-          return field;
-        }
-      }
-    } catch (layoutError) {
-      console.log("❌ App layout check failed:", layoutError.message);
-    }
-  }
-
-  // Method 3: Check browser storage for Auth0 tokens
-  if (typeof window !== "undefined") {
-    try {
-      console.log("🌐 Checking browser storage for Auth0 tokens...");
-
-      // Check for Auth0 tokens in storage
-      const tokenSources = [
-        () => localStorage.getItem("auth0.spajs.txs"),
-        () => localStorage.getItem("@@auth0spajs@@::user"),
-        () => localStorage.getItem("auth0.user"),
-        () => sessionStorage.getItem("auth0.user"),
-        () => localStorage.getItem("qlik-user"),
-        () => sessionStorage.getItem("qlik-user"),
-      ];
-
-      for (const getToken of tokenSources) {
-        try {
-          const token = getToken();
-          if (token) {
-            console.log("Found token in storage, attempting to parse...");
-
-            // Try to parse as JSON
-            try {
-              const parsed = JSON.parse(token);
-              const subject = parsed.sub || parsed.user_id || parsed.subject;
-              if (subject && subject.includes("auth0|")) {
-                console.log("✅ Found Auth0 subject in parsed token:", subject);
-                return subject;
-              }
-            } catch (parseError) {
-              // Try as JWT token
-              if (token.includes(".")) {
-                try {
-                  const payload = JSON.parse(atob(token.split(".")[1]));
-                  const subject = payload.sub || payload.user_id;
-                  if (subject && subject.includes("auth0|")) {
-                    console.log("✅ Found Auth0 subject in JWT:", subject);
-                    return subject;
-                  }
-                } catch (jwtError) {
-                  // Silent fail
-                }
-              }
-            }
-          }
-        } catch (e) {
-          // Silent fail for each token source
-        }
-      }
-    } catch (storageError) {
-      console.log("❌ Storage check failed:", storageError);
-    }
-  }
-
-  // Method 4: Check for Auth0 subject in URL or DOM
-  if (typeof window !== "undefined") {
-    try {
-      // Check URL parameters
-      const urlParams = new URLSearchParams(window.location.search);
-      for (const [key, value] of urlParams) {
-        if (value && value.includes("auth0|")) {
-          console.log(`✅ Found Auth0 subject in URL param ${key}:`, value);
-          return value;
-        }
-      }
-
-      // Check DOM elements that might contain user info
-      const metaElements = document.querySelectorAll('meta[content*="auth0|"]');
-      for (const meta of metaElements) {
-        const content = meta.getAttribute("content");
-        if (content && content.includes("auth0|")) {
-          console.log("✅ Found Auth0 subject in meta element:", content);
-          return content;
-        }
-      }
-    } catch (domError) {
-      console.log("DOM/URL check failed:", domError);
-    }
-  }
-
-  console.log("❌ No Auth0 subject found");
-  return "Unknown";
-}
-
-/**
- * Convert Auth0 subject ID to readable username using QlikCloud Users API
- */
-async function convertAuth0SubjectToReadableName(auth0Subject) {
-  try {
-    console.log(
-      "🌐 Attempting to convert Auth0 subject to readable name via API..."
-    );
-    console.log("Auth0 Subject:", auth0Subject);
-
-    // Extract tenant info from current URL
-    const hostname = window.location.hostname;
-    const tenantMatch = hostname.match(
-      /^([^.]+)\.(us|eu|ap|ca)\.qlikcloud\.com$/
-    );
-
-    if (!tenantMatch) {
-      console.log("❌ Could not determine tenant from hostname:", hostname);
-      return "Unknown";
-    }
-
-    const tenant = tenantMatch[1];
-    const region = tenantMatch[2];
-    const baseUrl = `https://${tenant}.${region}.qlikcloud.com`;
-
-    console.log("🏢 Detected tenant:", tenant, "region:", region);
-
-    // Try to get user info from QlikCloud Users API
-    const apiUrl = `${baseUrl}/api/v1/users?subject=${encodeURIComponent(
-      auth0Subject
-    )}`;
-    console.log("🔗 API URL:", apiUrl);
-
-    try {
-      // First try: Use current session cookies (if user is logged in)
-      const response = await fetch(apiUrl, {
-        method: "GET",
-        credentials: "include", // Include cookies
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.ok) {
-        const userData = await response.json();
-        console.log("✅ API Response:", userData);
-
-        if (userData.data && userData.data.length > 0) {
-          const user = userData.data[0];
-          const name = user.name || user.email || user.id;
-
-          if (name) {
-            console.log("✅ Found readable name from API:", name);
-
-            // Try to extract just the username part if it's an email
-            if (name.includes("@")) {
-              const username = name.split("@")[0];
-              console.log("📧 Extracted username from email:", username);
-              return username;
-            }
-
-            return name;
-          }
-        }
-      } else {
-        console.log(
-          "❌ API request failed:",
-          response.status,
-          response.statusText
-        );
-      }
-    } catch (apiError) {
-      console.log("❌ API call failed:", apiError.message);
-    }
-
-    return "Unknown";
-  } catch (error) {
-    console.error("💥 Error converting Auth0 subject:", error);
-    return "Unknown";
-  }
-}
-
-/**
- * Try to extract a reasonable username from Auth0 subject ID
- */
-async function extractUsernameFromAuth0Subject(auth0Subject) {
-  try {
-    console.log("🔧 Attempting to extract username from Auth0 subject...");
-
-    // Remove the auth0| prefix
-    const withoutPrefix = auth0Subject.replace("auth0|", "");
-
-    // If it looks like an email, extract the username part
-    if (withoutPrefix.includes("@")) {
-      const username = withoutPrefix.split("@")[0];
-      console.log("📧 Extracted username from email-like subject:", username);
-      return username;
-    }
-
-    // If it's a GUID-like string, try to make it more readable
-    if (withoutPrefix.match(/^[a-f0-9-]{36}$/i)) {
-      // It's a GUID, use first 8 characters as identifier
-      const shortId = withoutPrefix.substring(0, 8);
-      console.log("🆔 Using short ID from GUID:", shortId);
-      return `user_${shortId}`;
-    }
-
-    // If it's all hex or alphanumeric, take first 12 characters
-    if (withoutPrefix.match(/^[a-f0-9]+$/i) && withoutPrefix.length > 12) {
-      const shortId = withoutPrefix.substring(0, 12);
-      console.log("🔤 Using short hex ID:", shortId);
-      return `user_${shortId}`;
-    }
-
-    // If it contains recognizable patterns, try to extract them
-    const patterns = [
-      /([a-zA-Z0-9._-]+)@/, // Email username
-      /^([a-zA-Z0-9._-]+)/, // First part before special chars
-      /([a-zA-Z]+\d*)/, // Letters followed by optional numbers
-    ];
-
-    for (const pattern of patterns) {
-      const match = withoutPrefix.match(pattern);
-      if (match && match[1] && match[1].length >= 3) {
-        console.log("🎯 Extracted pattern-based username:", match[1]);
-        return match[1];
-      }
-    }
-
-    // Last resort: use the subject as-is but shortened
-    if (withoutPrefix.length > 20) {
-      const shortened = withoutPrefix.substring(0, 20) + "...";
-      console.log("✂️ Using shortened subject:", shortened);
-      return shortened;
-    }
-
-    console.log("🔄 Using subject without auth0 prefix:", withoutPrefix);
-    return withoutPrefix;
-  } catch (error) {
-    console.error("Error extracting username:", error);
-    return auth0Subject; // Return original if extraction fails
-  }
-}
-
-/**
- * Fallback user detection methods (from previous implementation)
- */
-async function fallbackUserDetection(app) {
-  console.log("🔄 Using fallback user detection methods...");
-
-  // Try basic methods from the previous implementation
-  try {
-    // Check app layout
-    if (app && typeof app.getAppLayout === "function") {
-      const appLayout = await app.getAppLayout();
-
-      const possibleUserFields = [
-        appLayout?.owner,
-        appLayout?.qMeta?.createdBy,
-        appLayout?.qMeta?.modifiedBy,
-        appLayout?.createdBy,
-        appLayout?.modifiedBy,
-        appLayout?.userId,
-      ];
-
-      for (const field of possibleUserFields) {
-        if (field && typeof field === "string" && field.trim() !== "") {
-          console.log("✅ Found user from fallback app layout:", field);
-          return field;
-        }
-      }
-    }
-
-    // Check browser context
-    if (typeof window !== "undefined") {
-      const browserSources = [
-        () => window.qlik?.currentUser?.name,
-        () => window.qlik?.user?.name,
-        () => window.currentUser,
-        () => localStorage.getItem("currentUser"),
-        () => sessionStorage.getItem("currentUser"),
-      ];
-
-      for (const getUser of browserSources) {
-        try {
-          const user = getUser();
-          if (user && typeof user === "string" && user.trim() !== "") {
-            console.log("✅ Found user from fallback browser context:", user);
-            return user;
-          }
-        } catch (e) {
-          // Silent fail
-        }
-      }
-    }
-
-    // Generate a reasonable fallback
-    const timestamp = Date.now().toString().slice(-6);
-    const fallbackUser = `qlik_user_${timestamp}`;
-    console.log("🔄 Generated fallback user:", fallbackUser);
-    return fallbackUser;
-  } catch (error) {
-    console.error("Fallback detection failed:", error);
-    return "Unknown";
-  }
-}
-
-/**
- * Save writeback data to Qlik Automation with Auth0-aware user detection
+ * Save writeback data directly to PostgreSQL database via Qlik Automation
  */
 export async function saveWritebackData(editedData, layout, app) {
   try {
-    console.log("Starting save operation with data:", editedData);
+    // === SAVE DEBUG ===
+    console.log("=== SAVE DEBUG ===");
+    console.log("editedData:", editedData);
+    console.log("layout structure:", layout?.qHyperCube);
+    console.log("Webhook URL:", ENV.DB_SAVE_WEBHOOK_URL);
+    console.log("Webhook Token:", ENV.DB_SAVE_TOKEN ? "Configured" : "Missing");
 
-    // Auth0-aware user detection for QlikCloud
+    console.log(
+      "Starting dynamic PostgreSQL save operation with data:",
+      editedData
+    );
+
+    // Get current user
     const currentUser = await getCurrentQlikUser(app);
-    console.log("🎯 Final detected user:", currentUser);
+    console.log("Current user:", currentUser);
 
-    return saveWithUser(editedData, layout, app, currentUser);
+    // Generate audit info
+    const timestamp = new Date().toISOString();
+    const appId = getConsistentAppId(app, layout);
+    const sessionId = getOrCreateSessionId();
+
+    console.log("Save context:", { appId, sessionId, user: currentUser });
+
+    // Convert edited data to database records
+    const dbRecords = convertToDbRecords(
+      editedData,
+      layout,
+      currentUser,
+      timestamp,
+      appId,
+      sessionId
+    );
+
+    console.log(`Generated ${dbRecords.length} database records to save`);
+
+    if (dbRecords.length === 0) {
+      return {
+        success: false,
+        message: "No changes to save",
+        type: "warning",
+      };
+    }
+
+    // Send to Qlik Automation for PostgreSQL insertion
+    const result = await sendToPostgreSQLAutomation(dbRecords, layout, {
+      appId,
+      sessionId,
+      user: currentUser,
+      timestamp,
+    });
+
+    return {
+      success: true,
+      message: `Successfully saved ${dbRecords.length} records to database`,
+      fileName: null,
+      timestamp,
+      changeCount: dbRecords.length,
+      savedBy: currentUser,
+      type: "success",
+    };
   } catch (error) {
-    console.error("Save operation failed:", error);
-    throw new Error(`Failed to save: ${error.message}`);
+    console.error("Dynamic PostgreSQL save operation failed:", error);
+    throw new Error(`Failed to save to database: ${error.message}`);
   }
 }
 
 /**
- * Continue with save operation using detected user
+ * Convert edited data to database record format - DYNAMIC VERSION
  */
-async function saveWithUser(editedData, layout, app, currentUser) {
-  // Generate basic audit info - use stable app ID
-  const timestamp = new Date().toISOString();
-  let appId;
-
-  // Priority: Use app.id first (more stable), then layout.qInfo.qId as fallback
-  if (app && app.id) {
-    appId = app.id;
-  } else if (layout?.qInfo?.qId) {
-    appId = layout.qInfo.qId;
-  } else {
-    appId = "unknown-app";
-  }
-
-  console.log(
-    "Saving writeback data for appId:",
-    appId,
-    "by user:",
-    currentUser
-  );
-
-  const fileName = `writeback_${appId}_${timestamp.replace(/[:.]/g, "-")}.csv`;
-
-  // Convert editedData to proper CSV format with detected user
-  const csvContent = generateProperCSV(
-    editedData,
-    layout,
-    timestamp,
-    currentUser
-  );
-
-  console.log("Generated CSV content with user:", currentUser);
-
-  // Send to your Qlik Automation
-  const result = await sendToAutomation(
-    csvContent,
-    appId,
-    timestamp,
-    fileName,
-    currentUser
-  );
-
-  return {
-    success: true,
-    message: "Data saved successfully",
-    fileName,
-    timestamp,
-    changeCount: Object.keys(editedData).length,
-    savedBy: currentUser,
-  };
-}
-
-// [Rest of the functions: generateProperCSV, getBaseColumns, getBaseRows, etc. - keep from previous version]
-
-/**
- * Generate properly structured CSV with base data + writeback changes
- * Creates audit trail with detected user information
- */
-function generateProperCSV(
+function convertToDbRecords(
   editedData,
   layout,
+  currentUser,
   timestamp,
-  currentUser = "Unknown"
+  appId,
+  sessionId
 ) {
-  console.log("Generating CSV for editedData:", editedData);
-  console.log("Using detected user:", currentUser);
+  console.log("Converting edited data to database records (DYNAMIC)...");
 
-  // Get base columns and rows from hypercube
-  const baseColumns = getBaseColumns(layout);
   const baseRows = getBaseRows(layout);
+  const baseColumns = getBaseColumns(layout);
+  const dbRecords = [];
 
-  console.log("Base columns:", baseColumns);
-  console.log("Base rows count:", baseRows.length);
+  // Get the model structure dynamically
+  const modelStructure = analyzeModelStructure(layout);
+  console.log("Detected model structure:", modelStructure);
 
-  // Get writeback configuration
-  const writebackConfig = layout?.writebackConfig || { columns: [] };
-  const writebackColumns = writebackConfig.columns || [];
-
-  console.log(
-    "Writeback columns:",
-    writebackColumns.map((c) => c.columnName)
+  // Group edited data by primary key (first dimension)
+  const editsByPrimaryKey = groupEditsByPrimaryKey(
+    editedData,
+    baseRows,
+    baseColumns,
+    modelStructure
   );
 
-  // Create full column headers with versioning
-  const allHeaders = [
-    ...baseColumns,
-    ...writebackColumns.map((col) => col.columnName),
-    "WRITEBACK_TIMESTAMP",
-    "WRITEBACK_USER",
-    "VERSION",
-    "CHANGE_TYPE",
-    "AUDIT_ID",
-  ];
+  console.log("Edits grouped by primary key:", Object.keys(editsByPrimaryKey));
 
-  const csvRows = [allHeaders.join(",")];
-  console.log("CSV Headers:", allHeaders);
+  // Generate version number
+  const version = Math.floor(Date.now() / 1000);
 
-  // Group edited values by row identifier
-  const editedValuesByRow = {};
+  // Create database record for each edited entity
+  Object.entries(editsByPrimaryKey).forEach(([primaryKey, edits]) => {
+    console.log(`Processing ${primaryKey}:`, edits);
+
+    // Find the source row data
+    const sourceRow = findRowByPrimaryKey(
+      baseRows,
+      baseColumns,
+      primaryKey,
+      modelStructure
+    );
+
+    if (!sourceRow) {
+      console.warn(`No source row found for ${primaryKey}`);
+      return;
+    }
+
+    // Create database record DYNAMICALLY
+    const dbRecord = createDynamicDbRecord(
+      sourceRow,
+      baseColumns,
+      modelStructure,
+      edits,
+      currentUser,
+      timestamp,
+      appId,
+      sessionId,
+      version,
+      primaryKey
+    );
+
+    dbRecords.push(dbRecord);
+    console.log(`Created dynamic DB record for ${primaryKey}:`, dbRecord);
+  });
+
+  return dbRecords;
+}
+
+/**
+ * UPDATED: Get writeback fields dynamically from extension configuration
+ * This replaces the hardcoded array
+ */
+function getWritebackFieldsFromConfig(layout) {
+  const writebackConfig = layout?.writebackConfig;
+
+  if (!writebackConfig?.enabled || !writebackConfig?.columns) {
+    console.log("No writeback configuration found, using fallback");
+    // Fallback to hardcoded fields if no configuration
+    return ["model_feedback", "comments"];
+  }
+
+  // Extract column names and convert to database format
+  const writebackFields = writebackConfig.columns.map((column) => {
+    return convertToDbColumnName(column.columnName);
+  });
+
+  console.log("Dynamic writeback fields from config:", writebackFields);
+  return writebackFields;
+}
+
+/**
+ * UPDATED: Analyze model structure - DYNAMIC writeback fields
+ */
+function analyzeModelStructure(layout) {
+  const dimensions = layout.qHyperCube?.qDimensionInfo || [];
+
+  const structure = {
+    primaryKey: null,
+    keyDimensions: [], // ONLY dimension fields (key business identifiers)
+    writebackFields: getWritebackFieldsFromConfig(layout), // DYNAMIC!
+    auditFields: [
+      "created_by",
+      "modified_by",
+      "created_at",
+      "modified_at",
+      "version",
+      "session_id",
+      "app_id",
+    ],
+  };
+
+  // First dimension is the primary key
+  if (dimensions.length > 0) {
+    structure.primaryKey = {
+      name: dimensions[0].qFallbackTitle,
+      dbColumn: convertToDbColumnName(dimensions[0].qFallbackTitle),
+      index: 0,
+    };
+  }
+
+  // ONLY dimensions (key identifiers) - NO measures
+  dimensions.forEach((dimension, index) => {
+    structure.keyDimensions.push({
+      name: dimension.qFallbackTitle,
+      dbColumn: convertToDbColumnName(dimension.qFallbackTitle),
+      index: index,
+      type: "dimension",
+    });
+  });
+
+  console.log("Dynamic model structure:", {
+    keyDimensions: structure.keyDimensions.length,
+    writebackFields: structure.writebackFields.length,
+    auditFields: structure.auditFields.length,
+    writebackColumns: structure.writebackFields,
+  });
+
+  return structure;
+}
+
+/**
+ * Generate all possible UI field name variations from database field name
+ * This makes the extension work with any naming convention
+ */
+function generateUIFieldVariations(dbFieldName) {
+  const variations = [];
+
+  // 1. Original database field name
+  variations.push(dbFieldName);
+
+  // 2. Replace underscores with spaces
+  const spacedVersion = dbFieldName.replace(/_/g, " ");
+  variations.push(spacedVersion);
+
+  // 3. Title Case (Model Feedback)
+  const titleCase = spacedVersion.replace(/\b\w/g, (l) => l.toUpperCase());
+  variations.push(titleCase);
+
+  // 4. Sentence case (Model feedback)
+  const sentenceCase =
+    spacedVersion.charAt(0).toUpperCase() + spacedVersion.slice(1);
+  variations.push(sentenceCase);
+
+  // 5. camelCase (modelFeedback)
+  const camelCase = dbFieldName.replace(/_([a-z])/g, (match, letter) =>
+    letter.toUpperCase()
+  );
+  variations.push(camelCase);
+
+  // 6. PascalCase (ModelFeedback)
+  const pascalCase = camelCase.charAt(0).toUpperCase() + camelCase.slice(1);
+  variations.push(pascalCase);
+
+  // 7. UPPERCASE variations
+  variations.push(dbFieldName.toUpperCase());
+  variations.push(spacedVersion.toUpperCase());
+  variations.push(titleCase.toUpperCase());
+
+  // 8. lowercase variations
+  variations.push(dbFieldName.toLowerCase());
+  variations.push(spacedVersion.toLowerCase());
+
+  // Remove duplicates and return
+  return [...new Set(variations)];
+}
+
+/**
+ * Fuzzy matching for field names as fallback
+ */
+function fuzzyMatchFields(uiFieldName, dbFieldName) {
+  const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalizedUI = normalize(uiFieldName);
+  const normalizedDB = normalize(dbFieldName);
+
+  return normalizedUI === normalizedDB;
+}
+
+/**
+ * UPDATED: Create database record - FULLY DYNAMIC FIELD MAPPING
+ * No hardcoded field names - uses naming convention
+ */
+function createDynamicDbRecord(
+  sourceRow,
+  baseColumns,
+  modelStructure,
+  edits,
+  currentUser,
+  timestamp,
+  appId,
+  sessionId,
+  version,
+  primaryKey
+) {
+  console.log("=== CREATE DB RECORD DEBUG ===");
+  console.log("Edits received:", edits);
+  console.log("Writeback fields expected:", modelStructure.writebackFields);
+
+  const dbRecord = {};
+
+  // Add ONLY key dimension fields (no measures)
+  modelStructure.keyDimensions.forEach((dimension) => {
+    const value = extractValueFromRow(
+      sourceRow,
+      dimension.index,
+      dimension.type
+    );
+    dbRecord[dimension.dbColumn] = value;
+  });
+
+  // Add writeback fields - DYNAMIC MAPPING with naming convention
+  modelStructure.writebackFields.forEach((dbFieldName) => {
+    let editValue = "";
+
+    // DYNAMIC: Generate all possible UI field name variations
+    const possibleUINames = generateUIFieldVariations(dbFieldName);
+
+    console.log(`Looking for edit value for DB field "${dbFieldName}"`);
+    console.log(`Possible UI names:`, possibleUINames);
+
+    // Find matching edit value from any possible UI name
+    for (const uiName of possibleUINames) {
+      if (edits.hasOwnProperty(uiName)) {
+        editValue = edits[uiName];
+        console.log(
+          `Found mapping: "${uiName}" → "${dbFieldName}" = "${editValue}"`
+        );
+        break;
+      }
+    }
+
+    // If still no match, try fuzzy matching as fallback
+    if (!editValue) {
+      Object.keys(edits).forEach((editKey) => {
+        if (fuzzyMatchFields(editKey, dbFieldName)) {
+          editValue = edits[editKey];
+          console.log(
+            `Fuzzy match: "${editKey}" → "${dbFieldName}" = "${editValue}"`
+          );
+        }
+      });
+    }
+
+    dbRecord[dbFieldName] = editValue;
+    console.log(`Final mapping: ${dbFieldName} = "${editValue}"`);
+  });
+
+  // Add audit fields
+  dbRecord.created_by = currentUser;
+  dbRecord.modified_by = currentUser;
+  dbRecord.created_at = timestamp;
+  dbRecord.modified_at = timestamp;
+  dbRecord.version = version;
+  dbRecord.session_id = sessionId;
+  dbRecord.app_id = appId;
+
+  console.log("=== FINAL DB RECORD ===");
+  console.log(dbRecord);
+  return dbRecord;
+}
+
+/**
+ * Convert Qlik field name to database column name
+ */
+function convertToDbColumnName(fieldName) {
+  return fieldName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "_") // Replace non-alphanumeric with underscore
+    .replace(/_+/g, "_") // Replace multiple underscores with single
+    .replace(/^_|_$/g, ""); // Remove leading/trailing underscores
+}
+
+/**
+ * Group edited data by primary key
+ */
+function groupEditsByPrimaryKey(
+  editedData,
+  baseRows,
+  baseColumns,
+  modelStructure
+) {
+  const grouped = {};
+
+  if (!modelStructure.primaryKey) {
+    console.error("No primary key field detected");
+    return grouped;
+  }
 
   Object.entries(editedData).forEach(([key, value]) => {
-    const lastDashIndex = key.lastIndexOf("-");
-    const rowId = key.substring(0, lastDashIndex);
-    const fieldName = key.substring(lastDashIndex + 1);
+    // Extract primary key from edit key
+    const primaryKey = extractPrimaryKeyFromEditKey(
+      key,
+      baseRows,
+      baseColumns,
+      modelStructure
+    );
 
-    if (!editedValuesByRow[rowId]) {
-      editedValuesByRow[rowId] = {};
+    if (primaryKey) {
+      if (!grouped[primaryKey]) {
+        grouped[primaryKey] = {};
+      }
+
+      // Extract field name from edit key
+      const fieldName = extractFieldNameFromEditKey(key);
+      grouped[primaryKey][fieldName] = value;
     }
-    editedValuesByRow[rowId][fieldName] = value;
   });
 
-  console.log("Edited values by row:", editedValuesByRow);
+  return grouped;
+}
 
-  // Generate version number (simple timestamp-based versioning)
-  const version = Math.floor(Date.now() / 1000); // Unix timestamp as version
+/**
+ * Extract primary key from edit key
+ */
+function extractPrimaryKeyFromEditKey(
+  editKey,
+  baseRows,
+  baseColumns,
+  modelStructure
+) {
+  // Handle composite keys (key1::key2::field) or simple keys (key-field)
+  if (editKey.includes("::")) {
+    return editKey.split("::")[0]; // First part is primary key
+  } else if (editKey.includes("-")) {
+    const lastDashIndex = editKey.lastIndexOf("-");
+    return editKey.substring(0, lastDashIndex);
+  }
 
-  // Process each edited row - CREATE AUDIT TRAIL VERSION
-  Object.entries(editedValuesByRow).forEach(([rowId, rowEdits]) => {
-    console.log(`Processing row ${rowId} with edits:`, rowEdits);
+  return null;
+}
 
-    // Find the corresponding base data row
-    const rowMatch = findMatchingRow(rowId, baseRows, baseColumns);
+/**
+ * Extract field name from edit key
+ */
+function extractFieldNameFromEditKey(editKey) {
+  if (editKey.includes("::")) {
+    const parts = editKey.split("::");
+    return parts[parts.length - 1]; // Last part is field name
+  } else if (editKey.includes("-")) {
+    const lastDashIndex = editKey.lastIndexOf("-");
+    return editKey.substring(lastDashIndex + 1);
+  }
 
-    if (rowMatch) {
-      console.log("Found matching row:", rowMatch.row);
+  return editKey;
+}
 
-      // Create audit trail row with version tracking and detected user
-      const csvRow = [];
+/**
+ * Find source row by primary key - ENHANCED VERSION
+ */
+function findRowByPrimaryKey(
+  baseRows,
+  baseColumns,
+  primaryKey,
+  modelStructure
+) {
+  console.log(`Looking for row with primaryKey: ${primaryKey}`);
+  console.log(`Base rows count: ${baseRows.length}`);
+  console.log(`Base columns:`, baseColumns);
 
-      // Add base column values
-      baseColumns.forEach((colName, colIndex) => {
-        const cellValue = rowMatch.row[colIndex];
-        const displayValue = cellValue ? cellValue.qText || "" : "";
-        csvRow.push(`"${displayValue}"`);
-      });
+  // Parse the primaryKey (row ID) to extract key components
+  // Row ID format: "aa16889|row-0" or "keypart1|keypart2|row-N"
+  const parts = primaryKey.split("|");
+  const rowIndexPart = parts[parts.length - 1]; // "row-N"
+  const keyParts = parts.slice(0, -1); // ["aa16889"] or ["keypart1", "keypart2"]
 
-      // Add ALL writeback column values for this row
-      writebackColumns.forEach((col) => {
-        const value = rowEdits[col.columnName] || col.defaultValue || "";
-        csvRow.push(`"${value}"`);
-      });
+  console.log(`Primary key parts:`, parts);
+  console.log(`Row index part: ${rowIndexPart}`);
+  console.log(`Key parts:`, keyParts);
 
-      // Add audit columns with detected user information
-      csvRow.push(`"${timestamp}"`); // WRITEBACK_TIMESTAMP
-      csvRow.push(`"${currentUser}"`); // WRITEBACK_USER (detected user!)
-      csvRow.push(`"${version}"`); // VERSION (incremental)
-      csvRow.push(`"UPDATE"`); // CHANGE_TYPE
-      csvRow.push(`"${generateAuditId()}"`); // AUDIT_ID
+  // Method 1: Extract row index and verify with AccountID
+  const rowIndexMatch = rowIndexPart.match(/row-(\d+)/);
+  if (rowIndexMatch) {
+    const rowIndex = parseInt(rowIndexMatch[1]);
+    console.log(`Extracted row index: ${rowIndex}`);
 
-      csvRows.push(csvRow.join(","));
+    if (rowIndex >= 0 && rowIndex < baseRows.length) {
+      const row = baseRows[rowIndex];
+      console.log(`Found row at index ${rowIndex}:`, row);
+
+      // Verify the row matches the key parts by checking AccountID (first dimension)
+      if (row[0] && row[0].qText && keyParts.length > 0) {
+        const firstKey = keyParts[0]; // Should be AccountID
+        const actualValue = row[0].qText;
+
+        console.log(`Comparing key: "${firstKey}" vs actual: "${actualValue}"`);
+
+        if (actualValue === firstKey) {
+          console.log(`Row matched successfully by index + AccountID!`);
+          return row;
+        } else {
+          console.log(
+            `Key mismatch: expected "${firstKey}", got "${actualValue}"`
+          );
+        }
+      } else {
+        console.log(`No key verification possible, using row by index anyway`);
+        return row;
+      }
     } else {
-      console.log(`No matching row found for rowId: ${rowId}`);
+      console.log(
+        `Row index ${rowIndex} out of bounds (max: ${baseRows.length - 1})`
+      );
+    }
+  } else {
+    console.log(`Could not extract row index from: ${rowIndexPart}`);
+  }
 
-      // Create fallback row with detected user information
-      const csvRow = [];
+  // Method 2: Fallback - search by AccountID in key parts
+  console.log(`Fallback: searching by AccountID in key parts...`);
+  if (keyParts.length > 0) {
+    const searchKey = keyParts[0]; // AccountID should be first
 
-      // Empty base columns
-      baseColumns.forEach(() => {
-        csvRow.push('""');
-      });
+    for (let i = 0; i < baseRows.length; i++) {
+      const row = baseRows[i];
+      if (row[0] && row[0].qText === searchKey) {
+        console.log(
+          `Found matching row by AccountID "${searchKey}" at index ${i}:`,
+          row
+        );
+        return row;
+      }
+    }
 
-      // Writeback columns with current edits
-      writebackColumns.forEach((col) => {
-        const value = rowEdits[col.columnName] || col.defaultValue || "";
-        csvRow.push(`"${value}"`);
-      });
+    console.log(`No row found with AccountID: ${searchKey}`);
+  }
 
-      // Audit columns with detected user
-      csvRow.push(`"${timestamp}"`);
-      csvRow.push(`"${currentUser}"`); // Detected user here too
-      csvRow.push(`"${version}"`);
-      csvRow.push(`"INSERT"`);
-      csvRow.push(`"${generateAuditId()}"`);
+  // Method 3: Last resort - try to match with primary key field directly
+  if (modelStructure.primaryKey) {
+    const primaryKeyIndex = modelStructure.primaryKey.index;
+    console.log(
+      `Last resort: searching by primary key index ${primaryKeyIndex}...`
+    );
 
-      csvRows.push(csvRow.join(","));
+    // Try to extract just the AccountID from the complex key
+    let searchValue = primaryKey;
+    if (keyParts.length > 0) {
+      searchValue = keyParts[0]; // First part should be AccountID
+    }
+
+    const foundRow = baseRows.find((row) => {
+      return row[primaryKeyIndex] && row[primaryKeyIndex].qText === searchValue;
+    });
+
+    if (foundRow) {
+      console.log(`Found row by primary key field match:`, foundRow);
+      return foundRow;
+    }
+  }
+
+  console.log(`No matching row found for primaryKey: ${primaryKey}`);
+  return null;
+}
+
+/**
+ * Extract value from row based on index and type
+ */
+function extractValueFromRow(row, index, type) {
+  if (!row[index]) return null;
+
+  if (type === "measure") {
+    const num = parseFloat(row[index].qNum);
+    return isNaN(num) ? null : num;
+  } else {
+    return row[index].qText || null;
+  }
+}
+
+/**
+ * Generate SQL dynamically based on record structure
+ */
+function generateDynamicSQL(record, modelStructure) {
+  // Get all columns from the record
+  const columns = Object.keys(record);
+  const values = columns.map((column) => {
+    const value = record[column];
+
+    // Handle different data types
+    if (value === null || value === undefined) {
+      return "NULL";
+    } else if (typeof value === "number") {
+      return value;
+    } else if (typeof value === "string") {
+      return `'${value.replace(/'/g, "''")}'`; // Escape single quotes
+    } else {
+      return `'${String(value).replace(/'/g, "''")}'`;
     }
   });
 
-  const finalCSV = csvRows.join("\n");
-  console.log("Final CSV with detected user:", finalCSV);
+  const sql = `
+INSERT INTO writeback_data (
+  ${columns.join(",\n  ")}
+) VALUES (
+  ${values.join(",\n  ")}
+);`;
 
-  return finalCSV;
+  return sql;
+}
+
+/**
+ * Send database records to Qlik Automation for PostgreSQL insertion
+ */
+async function sendToPostgreSQLAutomation(dbRecords, layout, context) {
+  if (
+    !ENV.DB_SAVE_WEBHOOK_URL ||
+    ENV.DB_SAVE_WEBHOOK_URL.includes("YOUR_TENANT")
+  ) {
+    throw new Error(
+      "Database webhook URL not configured. Please update config/env.js"
+    );
+  }
+
+  console.log("Sending to PostgreSQL automation (DYNAMIC):", {
+    webhookUrl: ENV.DB_SAVE_WEBHOOK_URL,
+    recordCount: dbRecords.length,
+    user: context.user,
+  });
+
+  // Analyze model structure for SQL generation
+  const modelStructure = analyzeModelStructure(layout);
+
+  // Generate SQL dynamically
+  const sql = generateDynamicSQL(dbRecords[0], modelStructure);
+
+  const payload = {
+    query: sql,
+    app_id: context.appId,
+    model_info: {
+      primary_key: modelStructure.primaryKey?.name,
+      key_dimensions: modelStructure.keyDimensions.map((d) => d.name),
+      writeback_fields: modelStructure.writebackFields, // 🎯 DYNAMIC
+      total_columns:
+        modelStructure.keyDimensions.length +
+        modelStructure.writebackFields.length +
+        modelStructure.auditFields.length,
+    },
+  };
+
+  console.log("Dynamic database payload:", JSON.stringify(payload, null, 2));
+
+  const requestOptions = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(ENV.DB_SAVE_TOKEN &&
+        !ENV.DB_SAVE_TOKEN.includes("your_actual") && {
+          "X-Execution-Token": ENV.DB_SAVE_TOKEN,
+        }),
+    },
+    body: JSON.stringify(payload),
+  };
+
+  const response = await fetch(ENV.DB_SAVE_WEBHOOK_URL, requestOptions);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("PostgreSQL automation error:", errorText);
+    throw new Error(
+      `HTTP ${response.status}: ${response.statusText} - ${errorText}`
+    );
+  }
+
+  let responseData;
+  try {
+    responseData = await response.json();
+  } catch {
+    responseData = { success: true, message: await response.text() };
+  }
+
+  console.log("PostgreSQL automation response:", responseData);
+  return responseData;
+}
+
+/**
+ * Get or create session ID
+ */
+function getOrCreateSessionId() {
+  let sessionId = sessionStorage.getItem("qlik_writeback_session");
+  if (!sessionId) {
+    sessionId = `session_${Date.now()}_${Math.random()
+      .toString(36)
+      .substr(2, 9)}`;
+    sessionStorage.setItem("qlik_writeback_session", sessionId);
+  }
+  return sessionId;
+}
+
+/**
+ * Get consistent app ID
+ */
+function getConsistentAppId(app, layout) {
+  if (app && app.id) {
+    return app.id;
+  } else if (layout?.qInfo?.qId) {
+    return layout.qInfo.qId;
+  } else {
+    return "unknown-app";
+  }
 }
 
 /**
@@ -635,156 +720,38 @@ function getBaseRows(layout) {
 }
 
 /**
- * Find matching row in base data using enhanced row ID logic
+ * Get current Qlik user
  */
-function findMatchingRow(rowId, baseRows, baseColumns) {
-  console.log(`Looking for row with ID: ${rowId}`);
+async function getCurrentQlikUser(app) {
+  console.log("Getting current user...");
 
-  // Parse the row ID to extract key components
-  // Row ID format: "keypart1|keypart2|keypart3|row-N"
-  const parts = rowId.split("|");
-  const rowIndexPart = parts[parts.length - 1]; // "row-N"
-  const keyParts = parts.slice(0, -1); // ["keypart1", "keypart2", "keypart3"]
-
-  // Extract row index
-  const rowIndexMatch = rowIndexPart.match(/row-(\d+)/);
-  if (rowIndexMatch) {
-    const rowIndex = parseInt(rowIndexMatch[1]);
-
-    if (rowIndex >= 0 && rowIndex < baseRows.length) {
-      const row = baseRows[rowIndex];
-      console.log(`Found row at index ${rowIndex}:`, row);
-
-      // Verify the row matches the key parts
-      let isMatch = true;
-      for (let i = 0; i < Math.min(keyParts.length, 3); i++) {
-        if (row[i] && row[i].qText !== keyParts[i]) {
-          isMatch = false;
-          break;
+  try {
+    if (app && typeof app.getAppLayout === "function") {
+      const appLayout = await app.getAppLayout();
+      const owner = appLayout?.owner;
+      if (owner && typeof owner === "string") {
+        if (owner.includes("\\")) {
+          return owner.split("\\").pop();
         }
-      }
-
-      if (isMatch) {
-        return { row, index: rowIndex };
+        return owner;
       }
     }
+
+    return "Unknown User";
+  } catch (error) {
+    console.error("Error getting user:", error);
+    return "Unknown User";
   }
-
-  // Fallback: try to find by key parts
-  for (let i = 0; i < baseRows.length; i++) {
-    const row = baseRows[i];
-    let matches = 0;
-
-    for (let j = 0; j < Math.min(keyParts.length, 3); j++) {
-      if (row[j] && row[j].qText === keyParts[j]) {
-        matches++;
-      }
-    }
-
-    if (matches >= 2) {
-      // At least 2 key parts match
-      console.log(`Found matching row by key parts at index ${i}:`, row);
-      return { row, index: i };
-    }
-  }
-
-  console.log("No matching row found");
-  return null;
 }
 
 /**
- * Generate unique audit ID
+ * Test the database connection
  */
-function generateAuditId() {
-  return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-/**
- * Send form data to Qlik Automation webhook
- */
-async function sendToAutomation(
-  csvContent,
-  appId,
-  timestamp,
-  fileName,
-  currentUser = "Unknown"
-) {
-  if (
-    !ENV.DB_SAVE_WEBHOOK_URL ||
-    ENV.DB_SAVE_WEBHOOK_URL.includes("YOUR_TENANT")
-  ) {
-    throw new Error(
-      "Save webhook URL not configured. Please update config/env.js"
-    );
-  }
-
-  console.log("Sending to automation:", {
-    webhookUrl: ENV.DB_SAVE_WEBHOOK_URL,
-    appId,
-    fileName,
-    user: currentUser,
-    csvLength: csvContent.length,
-  });
-
-  const formData = new FormData();
-  formData.append("csvContent", csvContent);
-  formData.append("appId", appId);
-  formData.append("timestamp", timestamp);
-  formData.append("userAgent", navigator.userAgent);
-  formData.append("fileName", fileName);
-  formData.append("currentUser", currentUser); // Send detected user info to automation
-
-  const requestOptions = {
-    method: "POST",
-    body: formData,
-  };
-
-  if (ENV.DB_SAVE_TOKEN && !ENV.DB_SAVE_TOKEN.includes("your_actual")) {
-    requestOptions.headers = {
-      "X-Execution-Token": ENV.DB_SAVE_TOKEN,
-    };
-  }
-
-  const response = await fetch(ENV.DB_SAVE_WEBHOOK_URL, requestOptions);
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("Automation response error:", errorText);
-    throw new Error(
-      `HTTP ${response.status}: ${response.statusText} - ${errorText}`
-    );
-  }
-
-  let responseData;
+export async function testDatabaseConnection() {
   try {
-    responseData = await response.json();
-  } catch {
-    responseData = { success: true, message: await response.text() };
-  }
-
-  console.log("Automation response:", responseData);
-  return responseData;
-}
-
-/**
- * Test the save webhook connection
- */
-export async function testSaveConnection() {
-  try {
-    if (
-      !ENV.DB_SAVE_WEBHOOK_URL ||
-      ENV.DB_SAVE_WEBHOOK_URL.includes("YOUR_TENANT")
-    ) {
-      return {
-        success: false,
-        error: "Webhook URL not configured",
-      };
-    }
-
     const testPayload = {
-      test: true,
-      timestamp: new Date().toISOString(),
-      message: "Connection test from Qlik extension",
+      query: "SELECT 1 as test_connection;",
+      app_id: "test_app",
     };
 
     const response = await fetch(ENV.DB_SAVE_WEBHOOK_URL, {
@@ -805,7 +772,7 @@ export async function testSaveConnection() {
 
     return {
       success: true,
-      message: "Connection test successful",
+      message: "Database connection test successful",
       status: response.status,
       timestamp: new Date().toISOString(),
     };

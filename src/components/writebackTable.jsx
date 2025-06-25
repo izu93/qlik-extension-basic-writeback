@@ -278,13 +278,19 @@ export default function WritebackTable({
 
   const updateEditedData = (rowId, field, value) => {
     const key = `${rowId}-${field}`;
-    setEditedData((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
+    console.log("Generated key:", key);
+    setEditedData((prev) => {
+      const newData = {
+        ...prev,
+        [key]: value,
+      };
+      return newData;
+    });
+
     setHasUnsavedChanges(true);
 
     // Schedule auto-save if enabled
+
     scheduleAutoSave();
   };
 
@@ -346,11 +352,12 @@ export default function WritebackTable({
   };
 
   const saveAllChanges = async () => {
+    // FIXED: Remove the duplicate early return
     if (!hasUnsavedChanges || Object.keys(editedData).length === 0) {
       return;
     }
 
-    // Validate all fields if required
+    // Continue with validation...
     const validationErrors = [];
     Object.entries(editedData).forEach(([key, value]) => {
       const field = key.split("-").pop();
@@ -377,7 +384,9 @@ export default function WritebackTable({
       const confirmed = window.confirm(
         `Save ${Object.keys(editedData).length} changes?`
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        return;
+      }
     }
 
     setIsSaving(true);
@@ -403,8 +412,6 @@ export default function WritebackTable({
         setAutoSaveTimer(null);
       }
     } catch (error) {
-      console.error("Error saving changes:", error);
-
       setSaveStatus({
         success: false,
         message: error.message,
@@ -414,7 +421,6 @@ export default function WritebackTable({
       setIsSaving(false);
     }
   };
-
   const clearAllChanges = () => {
     setEditedData({});
     setHasUnsavedChanges(false);
@@ -435,6 +441,7 @@ export default function WritebackTable({
   };
 
   // Render writeback cell based on dynamic configuration
+  // Replace your renderWritebackCell function with this complete version
   const renderWritebackCell = (rowId, field, config) => {
     const value = getEditedValue(rowId, field);
     const isDisabled = config.readOnly || currentMode !== "edit";
@@ -464,7 +471,9 @@ export default function WritebackTable({
             <input
               type="text"
               value={value}
-              onChange={(e) => handleChange(e.target.value)}
+              onChange={(e) => {
+                handleChange(e.target.value);
+              }}
               placeholder={config.placeholder}
               readOnly={config.readOnly}
               disabled={currentMode !== "edit"}
@@ -486,7 +495,9 @@ export default function WritebackTable({
           <div>
             <textarea
               value={value}
-              onChange={(e) => handleChange(e.target.value)}
+              onChange={(e) => {
+                handleChange(e.target.value);
+              }}
               placeholder={config.placeholder}
               readOnly={config.readOnly}
               disabled={currentMode !== "edit"}
@@ -514,7 +525,9 @@ export default function WritebackTable({
             <input
               type="number"
               value={value}
-              onChange={(e) => handleChange(e.target.value)}
+              onChange={(e) => {
+                handleChange(e.target.value);
+              }}
               placeholder={config.placeholder}
               readOnly={config.readOnly}
               disabled={currentMode !== "edit"}
@@ -537,10 +550,13 @@ export default function WritebackTable({
         const options = config.dropdownOptions
           ? config.dropdownOptions.split(",").map((opt) => opt.trim())
           : [];
+
         return (
           <select
             value={value}
-            onChange={(e) => handleChange(e.target.value)}
+            onChange={(e) => {
+              handleChange(e.target.value);
+            }}
             disabled={isDisabled}
             style={baseStyle}
           >
@@ -558,7 +574,9 @@ export default function WritebackTable({
           <input
             type="date"
             value={value}
-            onChange={(e) => handleChange(e.target.value)}
+            onChange={(e) => {
+              handleChange(e.target.value);
+            }}
             readOnly={config.readOnly}
             disabled={currentMode !== "edit"}
             style={baseStyle}
@@ -570,7 +588,9 @@ export default function WritebackTable({
           <input
             type="checkbox"
             checked={value === "true" || value === true}
-            onChange={(e) => handleChange(e.target.checked)}
+            onChange={(e) => {
+              handleChange(e.target.checked);
+            }}
             disabled={isDisabled}
             style={{
               width: "16px",
@@ -584,7 +604,6 @@ export default function WritebackTable({
         return <span>{value}</span>;
     }
   };
-
   // Check if a column is a writeback column
   const isWritebackColumn = (columnIndex) => {
     return isWritebackColumnIndex(columnIndex, layout);
