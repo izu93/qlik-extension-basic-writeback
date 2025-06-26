@@ -348,51 +348,333 @@ function createCleanDbRecord(
 }
 
 /**
- * Get current Qlik user - IMPROVED for readable names
+ * Get current Qlik user's REAL DISPLAY NAME like "karthik burra"
+ * This approach uses the Qlik Cloud Users REST API to get the actual user name
  */
 async function getCurrentQlikUser(app) {
-  console.log("🔍 Getting current user...");
+  console.log("Getting current user display name...");
 
   try {
-    if (app && typeof app.getAppLayout === "function") {
-      const appLayout = await app.getAppLayout();
-      let user = appLayout?.owner;
+    // Step 1: Get the user ID first using getAuthenticatedUser
+    let userId = null;
+    let userDirectory = null;
 
-      if (user && typeof user === "string") {
-        // Clean up user name
-        if (user.includes("\\")) {
-          user = user.split("\\").pop();
+    if (
+      app &&
+      app.global &&
+      typeof app.global.getAuthenticatedUser === "function"
+    ) {
+      try {
+        const userInfo = await app.global.getAuthenticatedUser();
+        console.log("Raw user info from getAuthenticatedUser:", userInfo);
+
+        if (userInfo) {
+          // Parse the response format: "UserDirectory=; UserId=auth0|..."
+          if (typeof userInfo === "string") {
+            const userIdMatch = userInfo.match(/UserId=([^;]+)/);
+            const userDirMatch = userInfo.match(/UserDirectory=([^;]*)/);
+
+            if (userIdMatch && userIdMatch[1]) {
+              userId = userIdMatch[1].trim();
+            }
+            if (userDirMatch && userDirMatch[1]) {
+              userDirectory = userDirMatch[1].trim();
+            }
+          } else if (typeof userInfo === "object") {
+            userId = userInfo.qUserId || userInfo.UserId || userInfo.userId;
+            userDirectory = userInfo.qUserDirectory || userInfo.UserDirectory;
+          }
         }
-
-        // Convert auth0 ID to readable format
-        if (user.startsWith("auth0|")) {
-          const shortId = user.substring(6, 14);
-          user = `user_${shortId}`;
-        }
-
-        // If it's an email, extract the username part
-        if (user.includes("@")) {
-          user = user.split("@")[0];
-        }
-
-        console.log("✅ Processed user name:", user);
-        return user;
+      } catch (error) {
+        console.log("getAuthenticatedUser failed:", error);
       }
     }
 
-    // Fallback: Generate session-based user
-    let sessionUser = sessionStorage.getItem("qlik_user_id");
-    if (!sessionUser) {
-      sessionUser = `user_${Date.now().toString().slice(-6)}`;
-      sessionStorage.setItem("qlik_user_id", sessionUser);
+    console.log("🔍 Extracted userId:", userId);
+    console.log("🔍 Extracted userDirectory:", userDirectory);
+
+    // Step 2: If we have a userId, try to get the display name from Qlik Cloud API
+    if (userId) {
+      try {
+        const displayName = await getUserDisplayNameFromAPI(userId, app);
+        if (displayName) {
+          console.log("SUCCESS: Got real display name from API:", displayName);
+          return displayName;
+        }
+      } catch (error) {
+        console.log("Failed to get display name from API:", error);
+      }
     }
 
-    console.log("📝 Using session user:", sessionUser);
+    // Step 3: Try alternative methods to get user info
+    if (app && typeof app.getAppLayout === "function") {
+      try {
+        const appLayout = await app.getAppLayout();
+        console.log("Checking app layout for user info...");
+
+        // Check app metadata for user names
+        let user = null;
+
+        if (appLayout?.qMeta?.createdBy) {
+          user = appLayout.qMeta.createdBy;
+        } else if (appLayout?.qMeta?.modifiedBy) {
+          user = appLayout.qMeta.modifiedBy;
+        } else if (appLayout?.qMeta?.owner) {
+          user = appLayout.qMeta.owner;
+        }
+
+        if (user && typeof user === "string") {
+          // If it looks like a display name (contains space), use it
+          if (
+            user.includes(" ") &&
+            !user.includes("@") &&
+            !user.includes("\\")
+          ) {
+            console.log("SUCCESS: Got display name from app layout:", user);
+            return user;
+          }
+        }
+      } catch (error) {
+        console.log("App layout method failed:", error);
+      }
+    }
+
+    // Step 4: Fallback - try to extract meaningful name from user ID
+    if (userId) {
+      let cleanUser = userId;
+
+      // Clean up auth0 IDs
+      if (cleanUser.startsWith("auth0|")) {
+        const authId = cleanUser.substring(6);
+        cleanUser = `user_${authId.substring(0, 8)}`;
+      }
+
+      // Clean up other formats
+      if (cleanUser.includes("\\")) {
+        cleanUser = cleanUser.split("\\").pop();
+      }
+      if (cleanUser.includes("@")) {
+        cleanUser = cleanUser.split("@")[0];
+      }
+
+      console.log("Using cleaned user ID:", cleanUser);
+      return cleanUser;
+    }
+
+    // Step 5: Generate session-based user as last resort
+    let sessionUser = null;
+
+    if (typeof sessionStorage !== "undefined") {
+      sessionUser = sessionStorage.getItem("qlik_writeback_user");
+    }
+
+    if (!sessionUser) {
+      const timestamp = Date.now().toString();
+      const random = Math.random().toString(36).substr(2, 5);
+      sessionUser = `user_${timestamp.slice(-6)}_${random}`;
+
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.setItem("qlik_writeback_user", sessionUser);
+      }
+    }
+
+    console.log("FALLBACK: Using generated session user:", sessionUser);
     return sessionUser;
   } catch (error) {
     console.error("Error getting user:", error);
-    return `user_${Date.now().toString().slice(-6)}`;
+
+    const fallbackUser = `user_${Date.now().toString().slice(-8)}`;
+    console.log("FINAL FALLBACK: Using emergency fallback user:", fallbackUser);
+    return fallbackUser;
   }
+}
+
+/**
+ * Get user display name from Qlik Cloud Users REST API
+ * This requires the user to be findable in the tenant's user list
+ */
+async function getUserDisplayNameFromAPI(userId, app) {
+  try {
+    console.log(
+      "Attempting to get display name from Qlik Cloud API for userId:",
+      userId
+    );
+
+    // Get the tenant hostname for API calls
+    const hostname = window.location.hostname;
+    if (!hostname.includes("qlikcloud")) {
+      console.log("Not on Qlik Cloud, skipping API call");
+      return null;
+    }
+
+    // Construct the Users API endpoint
+    const apiBaseUrl = `https://${hostname}/api/v1`;
+    const usersEndpoint = `${apiBaseUrl}/users`;
+
+    // Try to search for the user by subject (userId)
+    const searchUrl = `${usersEndpoint}?filter=subject eq "${encodeURIComponent(
+      userId
+    )}"`;
+
+    console.log("Making API call to:", searchUrl);
+
+    // Try to use the app's session for authentication
+    const response = await fetch(searchUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      credentials: "include", // Use the current session cookies
+    });
+
+    if (!response.ok) {
+      console.log("API call failed with status:", response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    console.log("API response:", data);
+
+    if (data.data && data.data.length > 0) {
+      const user = data.data[0];
+      if (user.name) {
+        console.log("Found user display name:", user.name);
+        return user.name;
+      }
+    }
+
+    console.log("No user found or no name field in response");
+    return null;
+  } catch (error) {
+    console.log("Failed to get user from API:", error);
+    return null;
+  }
+}
+
+/**
+ * Alternative method: Try to get user info from Qlik's internal APIs
+ * This might work in some Qlik Cloud environments
+ */
+async function getUserInfoFromInternalAPI(app) {
+  try {
+    // Try to get user info from Qlik's internal user API
+    const hostname = window.location.hostname;
+    const userInfoUrl = `https://${hostname}/api/v1/users/me`;
+
+    console.log("Trying internal user API:", userInfoUrl);
+
+    const response = await fetch(userInfoUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      credentials: "include",
+    });
+
+    if (response.ok) {
+      const userData = await response.json();
+      console.log("Internal API user data:", userData);
+
+      if (userData.name) {
+        console.log("Got display name from internal API:", userData.name);
+        return userData.name;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.log("Internal API failed:", error);
+    return null;
+  }
+}
+
+/**
+ * Enhanced user detection that tries to get real display name
+ */
+async function getReliableCurrentUser(app) {
+  console.log("Getting reliable current user with display name...");
+
+  // First try cached user
+  const cachedUser = getCachedUser();
+  if (cachedUser) {
+    console.log("Using cached user:", cachedUser);
+    return cachedUser;
+  }
+
+  // Try the main method
+  const user = await getCurrentQlikUser(app);
+
+  // Cache the result
+  if (typeof sessionStorage !== "undefined") {
+    sessionStorage.setItem("cached_qlik_user", user);
+    sessionStorage.setItem("cached_qlik_user_timestamp", Date.now().toString());
+  }
+
+  return user;
+}
+
+/**
+ * Get cached user if available and recent (within 1 hour)
+ */
+function getCachedUser() {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+
+    const cachedUser = sessionStorage.getItem("cached_qlik_user");
+    const cachedTimestamp = sessionStorage.getItem(
+      "cached_qlik_user_timestamp"
+    );
+
+    if (!cachedUser || !cachedTimestamp) return null;
+
+    const cacheAge = Date.now() - parseInt(cachedTimestamp);
+    const oneHour = 60 * 60 * 1000;
+
+    if (cacheAge < oneHour) {
+      return cachedUser;
+    } else {
+      // Clear old cache
+      sessionStorage.removeItem("cached_qlik_user");
+      sessionStorage.removeItem("cached_qlik_user_timestamp");
+      return null;
+    }
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Simple method to extract a reasonable display name from user ID
+ * This is used when API calls fail but we have a meaningful user ID
+ */
+function extractDisplayNameFromUserId(userId) {
+  if (!userId) return null;
+
+  // If it's an email, extract the username part and make it readable
+  if (userId.includes("@")) {
+    const username = userId.split("@")[0];
+    // Convert dots and underscores to spaces and title case
+    return username
+      .replace(/[._]/g, " ")
+      .replace(/\b\w/g, (l) => l.toUpperCase());
+  }
+
+  // If it has underscores or dots, make it readable
+  if (userId.includes("_") || userId.includes(".")) {
+    return userId
+      .replace(/[._]/g, " ")
+      .replace(/\b\w/g, (l) => l.toUpperCase());
+  }
+
+  // If it's camelCase, split it
+  if (/[a-z][A-Z]/.test(userId)) {
+    return userId
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/\b\w/g, (l) => l.toUpperCase());
+  }
+
+  return userId;
 }
 
 /**
