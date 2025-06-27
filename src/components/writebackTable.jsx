@@ -44,7 +44,7 @@ import {
 } from "../utils/dynamicColumnsUtils";
 
 /**
- * WritebackTable: Dynamic Columns + Key Dimensions Support
+ * WritebackTable: Dynamic Columns + Key Dimensions + Active Users Support
  */
 export default function WritebackTable({
   layout,
@@ -77,6 +77,13 @@ export default function WritebackTable({
   // Auto-save timer
   const [autoSaveTimer, setAutoSaveTimer] = useState(null);
 
+  // Active Users State Management
+  const [activeUsers, setActiveUsers] = useState([]);
+  const [showUserPanel, setShowUserPanel] = useState(false);
+  const [userActivity, setUserActivity] = useState({});
+  const [conflicts, setConflicts] = useState([]);
+  const [isWebSocketConnected, setIsWebSocketConnected] = useState(false);
+
   // Use dynamic columns system
   const columns = getAllColumns(layout);
   const baseColumns = getBaseColumns(layout);
@@ -105,6 +112,977 @@ export default function WritebackTable({
     writebackColumnMap.set(config.columnName, config);
   });
 
+  // Mock data for testing (TEMPORARY - will replace with real WebSocket)
+  const mockActiveUsers = [
+    {
+      id: "user_1",
+      name: "Karthik Burra",
+      initials: "KB",
+      status: "editing",
+      editingRow: "aa16889",
+      editingFields: ["Model Feedback", "Comments"],
+      startTime: new Date(Date.now() - 2 * 60 * 1000),
+      lastActivity: new Date(),
+      isCurrentUser: true,
+    },
+    {
+      id: "user_2",
+      name: "John Smith",
+      initials: "JS",
+      status: "typing",
+      editingRow: "aa33396",
+      editingFields: ["Model Feedback"],
+      startTime: new Date(Date.now() - 30 * 1000),
+      lastActivity: new Date(Date.now() - 5 * 1000),
+      isCurrentUser: false,
+    },
+    {
+      id: "user_3",
+      name: "Mary Rodriguez",
+      initials: "MR",
+      status: "viewing",
+      editingRow: null,
+      editingFields: [],
+      startTime: new Date(Date.now() - 5 * 60 * 1000),
+      lastActivity: new Date(Date.now() - 1 * 60 * 1000),
+      isCurrentUser: false,
+    },
+  ];
+
+  const mockConflicts = [
+    {
+      rowId: "aa16889",
+      users: ["Karthik Burra", "John Smith"],
+      fields: ["Model Feedback"],
+      severity: "warning",
+    },
+  ];
+
+  // Helper Functions for Active Users
+  const getUserStatusColor = (status) => {
+    switch (status) {
+      case "editing":
+        return "#28a745";
+      case "typing":
+        return "#ffc107";
+      case "viewing":
+        return "#6c757d";
+      case "idle":
+        return "#dee2e6";
+      default:
+        return "#6c757d";
+    }
+  };
+
+  const getUserStatusIcon = (status) => {
+    switch (status) {
+      case "editing":
+        return "✏️";
+      case "typing":
+        return "⌨️";
+      case "viewing":
+        return "👀";
+      case "idle":
+        return "💤";
+      default:
+        return "👤";
+    }
+  };
+
+  const getTimeSince = (date) => {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ago`;
+  };
+
+  // User Bubble Component - NO TOOLTIPS (panel shows details)
+  const UserBubble = ({ user, onClick }) => {
+    return (
+      <div
+        style={{
+          position: "relative",
+          width: "32px",
+          height: "32px",
+          borderRadius: "50%",
+          backgroundColor: getUserStatusColor(user.status),
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "white",
+          fontWeight: "bold",
+          fontSize: "11px",
+          cursor: "pointer",
+          animation:
+            user.status === "editing"
+              ? "pulse 2s infinite"
+              : user.status === "typing"
+              ? "typing 1s infinite"
+              : "none",
+          border: user.isCurrentUser ? "2px solid #007acc" : "none",
+          boxSizing: "border-box",
+          transition: "transform 0.2s ease-in-out",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.transform = "scale(1.1)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.transform = "scale(1)";
+        }}
+        onClick={() => onClick && onClick(user)}
+        title={`${user.name} - ${user.status}${
+          user.editingRow ? ` (${user.editingRow})` : ""
+        }`}
+      >
+        {user.initials}
+      </div>
+    );
+  };
+
+  // Conflict Alert Component
+  const ConflictAlert = ({ conflicts }) => {
+    if (conflicts.length === 0) return null;
+
+    return (
+      <div
+        style={{
+          background: "#fff3cd",
+          color: "#856404",
+          border: "1px solid #ffeaa7",
+          borderRadius: "4px",
+          padding: "8px 12px",
+          margin: "8px 0",
+          fontSize: "12px",
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          animation: "slideDown 0.3s ease-in-out",
+        }}
+      >
+        <span>⚠️</span>
+        <div style={{ flex: 1 }}>
+          <strong>Conflict Detected:</strong> {conflicts[0].users.join(" and ")}{" "}
+          are editing the same record ({conflicts[0].rowId}).
+        </div>
+        <button
+          style={{
+            padding: "4px 8px",
+            background: "#007acc",
+            color: "white",
+            border: "none",
+            borderRadius: "3px",
+            fontSize: "11px",
+            cursor: "pointer",
+          }}
+          onClick={() => setShowUserPanel(true)}
+        >
+          View Details
+        </button>
+      </div>
+    );
+  };
+
+  // User Collaboration Side Panel Component
+  const UserCollaborationPanel = ({ isOpen, onClose }) => {
+    if (!isOpen) return null;
+
+    const activeUsersCount = activeUsers.filter(
+      (u) => u.status !== "idle"
+    ).length;
+    const editingUsersCount = activeUsers.filter(
+      (u) => u.status === "editing"
+    ).length;
+
+    return (
+      <>
+        {/* Overlay */}
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.3)",
+            zIndex: 999,
+            animation: "fadeIn 0.2s ease-in-out",
+          }}
+          onClick={onClose}
+        />
+
+        {/* Side Panel */}
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            right: 0,
+            height: "100vh",
+            width: "350px",
+            background: "white",
+            borderLeft: "1px solid #dee2e6",
+            boxShadow: "-4px 0 12px rgba(0,0,0,0.15)",
+            zIndex: 1000,
+            animation: "slideInRight 0.3s ease-in-out",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {/* Panel Header */}
+          <div
+            style={{
+              padding: "20px",
+              borderBottom: "1px solid #dee2e6",
+              background: "#f8f9fa",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <h3
+                style={{
+                  margin: 0,
+                  color: "#2c5aa0",
+                  fontSize: "16px",
+                  fontWeight: "bold",
+                }}
+              >
+                👥 Live Collaboration
+              </h3>
+              <button
+                onClick={onClose}
+                style={{
+                  background: "none",
+                  border: "none",
+                  fontSize: "18px",
+                  cursor: "pointer",
+                  color: "#6c757d",
+                  padding: "4px",
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Summary Stats */}
+            <div
+              style={{
+                marginTop: "12px",
+                display: "flex",
+                gap: "12px",
+                flexWrap: "wrap",
+              }}
+            >
+              <div
+                style={{
+                  background: isWebSocketConnected ? "#e8f5e8" : "#f8f9fa",
+                  color: isWebSocketConnected ? "#2e7d32" : "#6c757d",
+                  padding: "6px 12px",
+                  borderRadius: "12px",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                <div
+                  style={{
+                    width: "6px",
+                    height: "6px",
+                    background: isWebSocketConnected ? "#4caf50" : "#6c757d",
+                    borderRadius: "50%",
+                    animation: isWebSocketConnected
+                      ? "blink 1s infinite"
+                      : "none",
+                  }}
+                />
+                {isWebSocketConnected ? "Live Connected" : "Offline"}
+              </div>
+
+              <div
+                style={{
+                  background: "#e3f2fd",
+                  color: "#1976d2",
+                  padding: "6px 12px",
+                  borderRadius: "12px",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                {activeUsersCount} Active Users
+              </div>
+
+              {editingUsersCount > 0 && (
+                <div
+                  style={{
+                    background: "#fff3cd",
+                    color: "#856404",
+                    padding: "6px 12px",
+                    borderRadius: "12px",
+                    fontSize: "11px",
+                    fontWeight: "500",
+                  }}
+                >
+                  {editingUsersCount} Editing
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Conflicts Section */}
+          {conflicts.length > 0 && (
+            <div style={{ padding: "16px", borderBottom: "1px solid #fee" }}>
+              <h4
+                style={{
+                  margin: "0 0 12px 0",
+                  color: "#dc3545",
+                  fontSize: "14px",
+                  fontWeight: "bold",
+                }}
+              >
+                ⚠️ Active Conflicts ({conflicts.length})
+              </h4>
+              {conflicts.map((conflict, index) => (
+                <div
+                  key={index}
+                  style={{
+                    background: "#fff3cd",
+                    border: "1px solid #ffeaa7",
+                    borderRadius: "4px",
+                    padding: "12px",
+                    marginBottom: "8px",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      color: "#856404",
+                      fontWeight: "bold",
+                    }}
+                  >
+                    Account: {conflict.rowId}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      color: "#856404",
+                      marginTop: "4px",
+                    }}
+                  >
+                    Users: {conflict.users.join(", ")}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      color: "#856404",
+                      marginTop: "4px",
+                    }}
+                  >
+                    Fields: {conflict.fields.join(", ")}
+                  </div>
+                  <button
+                    style={{
+                      marginTop: "8px",
+                      padding: "4px 8px",
+                      background: "#007acc",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "3px",
+                      fontSize: "10px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Resolve Conflict
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Users List */}
+          <div style={{ flex: 1, overflow: "auto", padding: "16px" }}>
+            <h4
+              style={{
+                margin: "0 0 16px 0",
+                color: "#495057",
+                fontSize: "14px",
+                fontWeight: "bold",
+              }}
+            >
+              Active Users ({activeUsers.length})
+            </h4>
+
+            {activeUsers.map((user) => (
+              <div
+                key={user.id}
+                style={{
+                  background: user.isCurrentUser ? "#e8f4fd" : "#f8f9fa",
+                  border: user.isCurrentUser
+                    ? "1px solid #007acc"
+                    : "1px solid #dee2e6",
+                  borderRadius: "6px",
+                  padding: "16px",
+                  marginBottom: "12px",
+                  position: "relative",
+                }}
+              >
+                {/* User Header */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    marginBottom: "8px",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: "40px",
+                      height: "40px",
+                      borderRadius: "50%",
+                      backgroundColor: getUserStatusColor(user.status),
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "white",
+                      fontWeight: "bold",
+                      fontSize: "14px",
+                      animation:
+                        user.status === "editing"
+                          ? "pulse 2s infinite"
+                          : user.status === "typing"
+                          ? "typing 1s infinite"
+                          : "none",
+                    }}
+                  >
+                    {user.initials}
+                  </div>
+
+                  <div style={{ flex: 1 }}>
+                    <div
+                      style={{
+                        fontSize: "14px",
+                        fontWeight: "bold",
+                        color: "#495057",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      {user.name}
+                      {user.isCurrentUser && (
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            background: "#007acc",
+                            color: "white",
+                            padding: "2px 6px",
+                            borderRadius: "8px",
+                          }}
+                        >
+                          You
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "#6c757d",
+                        marginTop: "2px",
+                      }}
+                    >
+                      {getUserStatusIcon(user.status)}{" "}
+                      {user.status.charAt(0).toUpperCase() +
+                        user.status.slice(1)}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Activity Details */}
+                {user.editingRow && (
+                  <div
+                    style={{
+                      background: "rgba(255, 255, 255, 0.8)",
+                      borderRadius: "4px",
+                      padding: "8px",
+                      marginBottom: "8px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: "#6c757d",
+                        fontWeight: "bold",
+                      }}
+                    >
+                      📝 Currently Working On:
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "#495057",
+                        marginTop: "4px",
+                      }}
+                    >
+                      <strong>Account:</strong> {user.editingRow}
+                    </div>
+                    {user.editingFields.length > 0 && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "#495057",
+                          marginTop: "2px",
+                        }}
+                      >
+                        <strong>Fields:</strong> {user.editingFields.join(", ")}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Timing Info */}
+                <div
+                  style={{
+                    fontSize: "10px",
+                    color: "#6c757d",
+                    display: "flex",
+                    gap: "12px",
+                  }}
+                >
+                  <span>🕐 Started: {getTimeSince(user.startTime)}</span>
+                  <span>📍 Last active: {getTimeSince(user.lastActivity)}</span>
+                </div>
+
+                {/* Action Buttons - REMOVED MESSAGE BUTTONS */}
+                {!user.isCurrentUser &&
+                  user.status === "editing" &&
+                  user.editingRow && (
+                    <div
+                      style={{ marginTop: "12px", display: "flex", gap: "6px" }}
+                    >
+                      <button
+                        style={{
+                          padding: "4px 8px",
+                          background: "#ffc107",
+                          color: "#000",
+                          border: "none",
+                          borderRadius: "3px",
+                          fontSize: "10px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        🚨 Request Access
+                      </button>
+                    </div>
+                  )}
+              </div>
+            ))}
+          </div>
+
+          {/* Panel Footer */}
+          <div
+            style={{
+              padding: "16px",
+              borderTop: "1px solid #dee2e6",
+              background: "#f8f9fa",
+            }}
+          >
+            <button
+              style={{
+                width: "100%",
+                padding: "10px",
+                background: "#28a745",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                fontSize: "12px",
+                fontWeight: "bold",
+                cursor: "pointer",
+                marginBottom: "8px",
+              }}
+            >
+              🔄 Refresh All Data
+            </button>
+
+            <div
+              style={{
+                fontSize: "10px",
+                color: "#6c757d",
+                textAlign: "center",
+              }}
+            >
+              Last updated: {new Date().toLocaleTimeString()}
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  // Active Users Header Component
+  const ActiveUsersHeader = () => {
+    const activeCount = activeUsers.filter((u) => u.status !== "idle").length;
+
+    return (
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "8px 0",
+          marginBottom: "8px",
+          borderBottom: "1px solid #eee",
+        }}
+      >
+        {/* Left side: Mode info and status */}
+        <div
+          style={{
+            fontSize: "14px",
+            color: "#495057",
+            display: "flex",
+            alignItems: "center",
+            gap: "16px",
+          }}
+        >
+          {/* Mode Toggle - only show if writeback is active */}
+          {hasActiveWriteback && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span
+                style={{
+                  fontSize: "12px",
+                  color: "#6c757d",
+                  fontWeight: "500",
+                }}
+              >
+                Mode:
+              </span>
+              <button
+                onClick={() => handleModeChange("edit")}
+                style={{
+                  padding: "4px 8px",
+                  backgroundColor:
+                    currentMode === "edit" ? "#007acc" : "#e9ecef",
+                  color: currentMode === "edit" ? "white" : "#6c757d",
+                  border: "none",
+                  borderRadius: "3px",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                ✏️ Edit
+              </button>
+              <button
+                onClick={() => handleModeChange("selection")}
+                style={{
+                  padding: "4px 8px",
+                  backgroundColor:
+                    currentMode === "selection" ? "#007acc" : "#e9ecef",
+                  color: currentMode === "selection" ? "white" : "#6c757d",
+                  border: "none",
+                  borderRadius: "3px",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                Select
+              </button>
+            </div>
+          )}
+
+          {/* Status information based on current mode */}
+          {currentMode === "edit" && hasActiveWriteback ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <span
+                style={{
+                  padding: "2px 8px",
+                  backgroundColor: "#e3f2fd",
+                  color: "#1976d2",
+                  borderRadius: "12px",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                }}
+              >
+                📝 {configuredColumns.length} Writeback Column
+                {configuredColumns.length !== 1 ? "s" : ""}
+              </span>
+
+              {keyDimensionsSummary.hasKeyDimensions && (
+                <span
+                  style={{
+                    padding: "2px 8px",
+                    backgroundColor: "#e8f5e8",
+                    color: "#2e7d32",
+                    borderRadius: "12px",
+                    fontSize: "11px",
+                    fontWeight: "500",
+                  }}
+                >
+                  🔑 {keyDimensionsSummary.keyDimensionNames.join("+")}
+                </span>
+              )}
+
+              <span>
+                {isLoadingWriteback ? (
+                  <span style={{ color: "#007acc" }}>
+                    Loading existing data...
+                  </span>
+                ) : hasUnsavedChanges ? (
+                  <span style={{ color: "#dc3545", fontWeight: "500" }}>
+                    <strong>{Object.keys(editedData).length}</strong> unsaved
+                    change{Object.keys(editedData).length !== 1 ? "s" : ""}
+                  </span>
+                ) : saveStatus?.success ? (
+                  <span style={{ color: "#28a745" }}>
+                    ✅ Saved to {saveStatus.fileName}
+                  </span>
+                ) : (
+                  <span style={{ color: "#28a745" }}>✅ All changes saved</span>
+                )}
+              </span>
+            </div>
+          ) : currentMode === "selection" ? (
+            <div>
+              {selectedCells.size > 0 ? (
+                <span>
+                  <strong>{selectedCells.size}</strong> dimension values
+                  selected for batch operation
+                </span>
+              ) : (
+                <span>
+                  Click dimension cells to select • Use checkboxes for batch
+                  operations
+                </span>
+              )}
+            </div>
+          ) : (
+            <span style={{ color: "#6c757d" }}>
+              <strong>Writeback:</strong>{" "}
+              {!writebackConfig.enabled
+                ? "Disabled"
+                : configuredColumns.length === 0
+                ? "No columns configured"
+                : `${configuredColumns.length} column${
+                    configuredColumns.length !== 1 ? "s" : ""
+                  } ready`}
+            </span>
+          )}
+        </div>
+
+        {/* Right side: Active Users + Controls */}
+        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+          {/* Active Users Section */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "12px", color: "#6c757d" }}>
+              👥 Active:
+            </span>
+
+            {/* User Bubbles */}
+            <div style={{ display: "flex", gap: "6px" }}>
+              {activeUsers.slice(0, 4).map((user) => (
+                <UserBubble
+                  key={user.id}
+                  user={user}
+                  onClick={() => setShowUserPanel(true)}
+                />
+              ))}
+              {activeUsers.length > 4 && (
+                <div
+                  style={{
+                    width: "32px",
+                    height: "32px",
+                    borderRadius: "50%",
+                    backgroundColor: "#dee2e6",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "#6c757d",
+                    fontSize: "10px",
+                    fontWeight: "bold",
+                    cursor: "pointer",
+                  }}
+                  onClick={() => setShowUserPanel(true)}
+                >
+                  +{activeUsers.length - 4}
+                </div>
+              )}
+            </div>
+
+            {/* Live Status */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                background: isWebSocketConnected ? "#e8f5e8" : "#f8f9fa",
+                color: isWebSocketConnected ? "#2e7d32" : "#6c757d",
+                padding: "4px 8px",
+                borderRadius: "12px",
+                fontSize: "11px",
+                fontWeight: "500",
+              }}
+            >
+              <div
+                style={{
+                  width: "6px",
+                  height: "6px",
+                  background: isWebSocketConnected ? "#4caf50" : "#6c757d",
+                  borderRadius: "50%",
+                  animation: isWebSocketConnected
+                    ? "blink 1s infinite"
+                    : "none",
+                }}
+              />
+              {isWebSocketConnected ? "Live" : "Offline"} ({activeCount} users)
+            </div>
+
+            {/* User Panel Toggle Button */}
+            <button
+              onClick={() => setShowUserPanel(!showUserPanel)}
+              style={{
+                padding: "6px 8px",
+                backgroundColor: showUserPanel ? "#007acc" : "#e9ecef",
+                color: showUserPanel ? "white" : "#6c757d",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontSize: "11px",
+                fontWeight: "500",
+              }}
+              title="Toggle user collaboration panel"
+            >
+              👥 Users
+            </button>
+          </div>
+
+          {/* Existing Mode-specific Controls */}
+          {currentMode === "edit" &&
+            hasActiveWriteback &&
+            writebackConfig.saveMode === "manual" && (
+              <>
+                <button
+                  onClick={saveAllChanges}
+                  disabled={
+                    !hasUnsavedChanges || isSaving || isLoadingWriteback
+                  }
+                  style={{
+                    padding: "6px 12px",
+                    backgroundColor:
+                      !hasUnsavedChanges || isSaving || isLoadingWriteback
+                        ? "#6c757d"
+                        : "#28a745",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor:
+                      !hasUnsavedChanges || isSaving || isLoadingWriteback
+                        ? "not-allowed"
+                        : "pointer",
+                    fontSize: "12px",
+                    fontWeight: "500",
+                  }}
+                >
+                  {isSaving
+                    ? "Saving..."
+                    : hasUnsavedChanges
+                    ? `Save Changes (${Object.keys(editedData).length})`
+                    : "No Changes"}
+                </button>
+
+                <button
+                  onClick={clearAllChanges}
+                  disabled={
+                    !hasUnsavedChanges || isSaving || isLoadingWriteback
+                  }
+                  style={{
+                    padding: "6px 12px",
+                    backgroundColor: "#dc3545",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor:
+                      !hasUnsavedChanges || isSaving || isLoadingWriteback
+                        ? "not-allowed"
+                        : "pointer",
+                    fontSize: "12px",
+                  }}
+                >
+                  Clear Changes
+                </button>
+              </>
+            )}
+
+          {currentMode === "selection" && (
+            <>
+              {selectedCells.size > 0 && (
+                <>
+                  <button
+                    onClick={onApplyCellSelections}
+                    disabled={isApplyingSelection}
+                    style={{
+                      padding: "6px 12px",
+                      backgroundColor: isApplyingSelection
+                        ? "#6c757d"
+                        : "#28a745",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: isApplyingSelection ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      fontWeight: "500",
+                    }}
+                  >
+                    {isApplyingSelection
+                      ? "Applying..."
+                      : `Apply Cell Selections (${selectedCells.size})`}
+                  </button>
+                  <button
+                    onClick={() => setSelectedCells(new Set())}
+                    disabled={isApplyingSelection}
+                    style={{
+                      padding: "6px 12px",
+                      backgroundColor: "#6c757d",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: isApplyingSelection ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                    }}
+                  >
+                    Clear Cell Selections
+                  </button>
+                </>
+              )}
+
+              <button
+                onClick={() => setSelectionMode(!selectionMode)}
+                disabled={isApplyingSelection}
+                style={{
+                  padding: "6px 12px",
+                  backgroundColor: selectionMode ? "#ffc107" : "#007acc",
+                  color: selectionMode ? "#000" : "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: isApplyingSelection ? "not-allowed" : "pointer",
+                  fontSize: "12px",
+                }}
+              >
+                {selectionMode ? "Exit Multi Select" : "Multi Select"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   // Auto-save functionality
   const scheduleAutoSave = useCallback(() => {
     if (writebackConfig.saveMode === "auto" && hasUnsavedChanges) {
@@ -125,6 +1103,57 @@ export default function WritebackTable({
     hasUnsavedChanges,
     autoSaveTimer,
   ]);
+
+  // Initialize mock data for testing
+  useEffect(() => {
+    setActiveUsers(mockActiveUsers);
+    setConflicts(mockConflicts);
+    setIsWebSocketConnected(true);
+  }, []);
+
+  // Inject CSS styles
+  useEffect(() => {
+    const styles = `
+      @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.1); }
+        100% { transform: scale(1); }
+      }
+      
+      @keyframes typing {
+        0%, 50% { opacity: 1; }
+        25%, 75% { opacity: 0.7; }
+      }
+      
+      @keyframes blink {
+        0%, 50% { opacity: 1; }
+        51%, 100% { opacity: 0.3; }
+      }
+      
+      @keyframes slideDown {
+        0% { opacity: 0; transform: translateY(-10px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+      
+      @keyframes fadeIn {
+        0% { opacity: 0; }
+        100% { opacity: 1; }
+      }
+      
+      @keyframes slideInRight {
+        0% { transform: translateX(100%); }
+        100% { transform: translateX(0); }
+      }
+    `;
+
+    const styleSheet = document.createElement("style");
+    styleSheet.textContent = styles;
+    document.head.appendChild(styleSheet);
+
+    return () => {
+      document.head.removeChild(styleSheet);
+    };
+  }, []);
 
   // Batch save functionality
   useEffect(() => {
@@ -272,7 +1301,6 @@ export default function WritebackTable({
 
   // Writeback functionality with enhanced row ID using key dimensions
   const getRowId = (row, index) => {
-    // Use enhanced row ID that combines key dimensions with fallback
     return createEnhancedRowId(row, index, layout, baseColumns);
   };
 
@@ -288,9 +1316,6 @@ export default function WritebackTable({
     });
 
     setHasUnsavedChanges(true);
-
-    // Schedule auto-save if enabled
-
     scheduleAutoSave();
   };
 
@@ -305,12 +1330,10 @@ export default function WritebackTable({
 
     const validation = config.validation;
 
-    // Required field validation
     if (config.required && (!value || value.trim() === "")) {
       return { isValid: false, message: "This field is required" };
     }
 
-    // Type-specific validation
     switch (config.columnType) {
       case "text":
       case "textarea":
@@ -352,12 +1375,10 @@ export default function WritebackTable({
   };
 
   const saveAllChanges = async () => {
-    // FIXED: Remove the duplicate early return
     if (!hasUnsavedChanges || Object.keys(editedData).length === 0) {
       return;
     }
 
-    // Continue with validation...
     const validationErrors = [];
     Object.entries(editedData).forEach(([key, value]) => {
       const field = key.split("-").pop();
@@ -379,7 +1400,6 @@ export default function WritebackTable({
       return;
     }
 
-    // Confirm before save if enabled
     if (writebackConfig.confirmBeforeSave) {
       const confirmed = window.confirm(
         `Save ${Object.keys(editedData).length} changes?`
@@ -406,7 +1426,6 @@ export default function WritebackTable({
       setHasUnsavedChanges(false);
       setEditedData({});
 
-      // Clear auto-save timer
       if (autoSaveTimer) {
         clearTimeout(autoSaveTimer);
         setAutoSaveTimer(null);
@@ -421,12 +1440,12 @@ export default function WritebackTable({
       setIsSaving(false);
     }
   };
+
   const clearAllChanges = () => {
     setEditedData({});
     setHasUnsavedChanges(false);
     setSaveStatus(null);
 
-    // Clear auto-save timer
     if (autoSaveTimer) {
       clearTimeout(autoSaveTimer);
       setAutoSaveTimer(null);
@@ -440,8 +1459,6 @@ export default function WritebackTable({
     }
   };
 
-  // Render writeback cell based on dynamic configuration
-  // Replace your renderWritebackCell function with this complete version
   const renderWritebackCell = (rowId, field, config) => {
     const value = getEditedValue(rowId, field);
     const isDisabled = config.readOnly || currentMode !== "edit";
@@ -471,9 +1488,7 @@ export default function WritebackTable({
             <input
               type="text"
               value={value}
-              onChange={(e) => {
-                handleChange(e.target.value);
-              }}
+              onChange={(e) => handleChange(e.target.value)}
               placeholder={config.placeholder}
               readOnly={config.readOnly}
               disabled={currentMode !== "edit"}
@@ -495,9 +1510,7 @@ export default function WritebackTable({
           <div>
             <textarea
               value={value}
-              onChange={(e) => {
-                handleChange(e.target.value);
-              }}
+              onChange={(e) => handleChange(e.target.value)}
               placeholder={config.placeholder}
               readOnly={config.readOnly}
               disabled={currentMode !== "edit"}
@@ -525,9 +1538,7 @@ export default function WritebackTable({
             <input
               type="number"
               value={value}
-              onChange={(e) => {
-                handleChange(e.target.value);
-              }}
+              onChange={(e) => handleChange(e.target.value)}
               placeholder={config.placeholder}
               readOnly={config.readOnly}
               disabled={currentMode !== "edit"}
@@ -554,9 +1565,7 @@ export default function WritebackTable({
         return (
           <select
             value={value}
-            onChange={(e) => {
-              handleChange(e.target.value);
-            }}
+            onChange={(e) => handleChange(e.target.value)}
             disabled={isDisabled}
             style={baseStyle}
           >
@@ -574,9 +1583,7 @@ export default function WritebackTable({
           <input
             type="date"
             value={value}
-            onChange={(e) => {
-              handleChange(e.target.value);
-            }}
+            onChange={(e) => handleChange(e.target.value)}
             readOnly={config.readOnly}
             disabled={currentMode !== "edit"}
             style={baseStyle}
@@ -588,9 +1595,7 @@ export default function WritebackTable({
           <input
             type="checkbox"
             checked={value === "true" || value === true}
-            onChange={(e) => {
-              handleChange(e.target.checked);
-            }}
+            onChange={(e) => handleChange(e.target.checked)}
             disabled={isDisabled}
             style={{
               width: "16px",
@@ -604,14 +1609,12 @@ export default function WritebackTable({
         return <span>{value}</span>;
     }
   };
-  // Check if a column is a writeback column
+
   const isWritebackColumn = (columnIndex) => {
     return isWritebackColumnIndex(columnIndex, layout);
   };
 
-  // Cell selection functionality (only for base columns)
   function handleCellSelection(rowIndex, columnIndex, cellValue) {
-    // Only allow selection for base columns
     if (isWritebackColumn(columnIndex)) return;
 
     const cellKey = `${rowIndex}-${columnIndex}-${cellValue.qText}-${cellValue.qElemNumber}`;
@@ -648,7 +1651,6 @@ export default function WritebackTable({
     setSelectedCells(newSelections);
   }
 
-  // Cell click handling (only for base columns)
   async function onCellClick(columnIndex, cellValue, row, pageRowIndex) {
     if (currentMode === "edit") {
       return;
@@ -658,12 +1660,10 @@ export default function WritebackTable({
       return;
     }
 
-    // Don't allow clicks on writeback columns
     if (isWritebackColumn(columnIndex)) {
       return;
     }
 
-    // Map to base column index for selection
     const baseColumnIndex = mapToBaseColumnIndex(columnIndex, layout);
     if (baseColumnIndex === -1) return;
 
@@ -689,7 +1689,6 @@ export default function WritebackTable({
     }
   }
 
-  // Apply cell selections (only for base columns)
   async function onApplyCellSelections() {
     setIsApplyingSelection(true);
 
@@ -702,7 +1701,6 @@ export default function WritebackTable({
         const row = pagedRows[parseInt(rowIndex)];
         const colIdx = parseInt(columnIndex);
 
-        // Only process base columns
         if (isWritebackColumn(colIdx)) return;
 
         const baseColIdx = mapToBaseColumnIndex(colIdx, layout);
@@ -771,7 +1769,6 @@ export default function WritebackTable({
     }
   }
 
-  // Clear selections
   async function onClearAllSelections() {
     setIsApplyingSelection(true);
 
@@ -800,7 +1797,6 @@ export default function WritebackTable({
     displayRows.length
   );
 
-  // Dynamic column widths based on configuration
   const getColumnWidth = (columnIndex) => {
     if (isWritebackColumn(columnIndex)) {
       const columnName = getWritebackColumnName(columnIndex, layout);
@@ -808,15 +1804,12 @@ export default function WritebackTable({
       if (config && config.width) {
         return config.width;
       }
-      return "200px"; // Default width for writeback columns
+      return "200px";
     }
-
-    // Default width for all base columns (no hardcoded column names)
     return "120px";
   };
 
   function handleHeaderClick(idx) {
-    // Don't allow sorting on writeback columns
     if (!isWritebackColumn(idx)) {
       if (sortBy === idx) {
         setSortDir((prev) => !prev);
@@ -840,381 +1833,11 @@ export default function WritebackTable({
 
   return (
     <div style={{ width: "100%", height: "100%" }}>
-      {/* Mode Toggle & Controls */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "8px 0",
-          marginBottom: "8px",
-          borderBottom: "1px solid #eee",
-        }}
-      >
-        {/* Left side: Mode info and status */}
-        <div
-          style={{
-            fontSize: "14px",
-            color: "#495057",
-            display: "flex",
-            alignItems: "center",
-            gap: "16px",
-          }}
-        >
-          {/* Mode Toggle - only show if writeback is active */}
-          {hasActiveWriteback && (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span
-                style={{
-                  fontSize: "12px",
-                  color: "#6c757d",
-                  fontWeight: "500",
-                }}
-              >
-                Mode:
-              </span>
-              <button
-                onClick={() => handleModeChange("edit")}
-                style={{
-                  padding: "4px 8px",
-                  backgroundColor:
-                    currentMode === "edit" ? "#007acc" : "#e9ecef",
-                  color: currentMode === "edit" ? "white" : "#6c757d",
-                  border: "none",
-                  borderRadius: "3px",
-                  cursor: "pointer",
-                  fontSize: "11px",
-                  fontWeight: "500",
-                }}
-              >
-                ✏️ Edit
-              </button>
-              <button
-                onClick={() => handleModeChange("selection")}
-                style={{
-                  padding: "4px 8px",
-                  backgroundColor:
-                    currentMode === "selection" ? "#007acc" : "#e9ecef",
-                  color: currentMode === "selection" ? "white" : "#6c757d",
-                  border: "none",
-                  borderRadius: "3px",
-                  cursor: "pointer",
-                  fontSize: "11px",
-                  fontWeight: "500",
-                }}
-              >
-                Select
-              </button>
-            </div>
-          )}
+      {/* NEW: Active Users Header */}
+      <ActiveUsersHeader />
 
-          {/* Status information based on current mode */}
-          {currentMode === "edit" && hasActiveWriteback ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              {/* Writeback Configuration Info */}
-              <span
-                style={{
-                  padding: "2px 8px",
-                  backgroundColor: "#e3f2fd",
-                  color: "#1976d2",
-                  borderRadius: "12px",
-                  fontSize: "11px",
-                  fontWeight: "500",
-                }}
-              >
-                📝 {configuredColumns.length} Writeback Column
-                {configuredColumns.length !== 1 ? "s" : ""}
-              </span>
-
-              {/* Save Mode Indicator */}
-              <span
-                style={{
-                  padding: "2px 8px",
-                  backgroundColor:
-                    writebackConfig.saveMode === "auto"
-                      ? "#fff3cd"
-                      : writebackConfig.saveMode === "batch"
-                      ? "#d1ecf1"
-                      : "#f8f9fa",
-                  color:
-                    writebackConfig.saveMode === "auto"
-                      ? "#856404"
-                      : writebackConfig.saveMode === "batch"
-                      ? "#0c5460"
-                      : "#6c757d",
-                  borderRadius: "12px",
-                  fontSize: "11px",
-                  fontWeight: "500",
-                }}
-              >
-                {writebackConfig.saveMode === "auto"
-                  ? "🔄 Auto Save"
-                  : writebackConfig.saveMode === "batch"
-                  ? "⏱️ Batch Save"
-                  : "💾 Manual Save"}
-              </span>
-
-              {/* Key Dimensions Info */}
-              {keyDimensionsSummary.hasKeyDimensions && (
-                <span
-                  style={{
-                    padding: "2px 8px",
-                    backgroundColor: "#e8f5e8",
-                    color: "#2e7d32",
-                    borderRadius: "12px",
-                    fontSize: "11px",
-                    fontWeight: "500",
-                  }}
-                >
-                  🔑 {keyDimensionsSummary.keyDimensionNames.join("+")}
-                  {!keyValidation.isValid && (
-                    <span style={{ color: "#d32f2f", marginLeft: "4px" }}>
-                      ⚠️
-                    </span>
-                  )}
-                </span>
-              )}
-
-              {/* Writeback Status */}
-              <span>
-                {isLoadingWriteback ? (
-                  <span style={{ color: "#007acc" }}>
-                    Loading existing data...
-                  </span>
-                ) : hasUnsavedChanges ? (
-                  <span style={{ color: "#dc3545", fontWeight: "500" }}>
-                    <strong>{Object.keys(editedData).length}</strong> unsaved
-                    change{Object.keys(editedData).length !== 1 ? "s" : ""}
-                    {writebackConfig.saveMode === "auto" && autoSaveTimer && (
-                      <span style={{ color: "#ffc107", marginLeft: "8px" }}>
-                        (Auto-saving...)
-                      </span>
-                    )}
-                  </span>
-                ) : saveStatus?.success ? (
-                  <span style={{ color: "#28a745" }}>
-                    ✅ Saved to {saveStatus.fileName}
-                  </span>
-                ) : saveStatus && !saveStatus.success ? (
-                  <span style={{ color: "#dc3545" }}>
-                    ❌ Save failed: {saveStatus.message}
-                  </span>
-                ) : (
-                  <span style={{ color: "#28a745" }}>✅ All changes saved</span>
-                )}
-              </span>
-
-              {/* Writeback Columns Info */}
-              {writebackConfig.showChangeCounter !== false && (
-                <span style={{ fontSize: "12px", color: "#6c757d" }}>
-                  Writeback:{" "}
-                  {configuredColumns.map((col) => col.columnName).join(", ")}
-                </span>
-              )}
-            </div>
-          ) : currentMode === "selection" ? (
-            <div>
-              {selectedCells.size > 0 ? (
-                <span>
-                  <strong>{selectedCells.size}</strong> dimension values
-                  selected for batch operation
-                </span>
-              ) : (
-                <span>
-                  Click dimension cells to select • Use checkboxes for batch
-                  operations
-                </span>
-              )}
-            </div>
-          ) : !writebackConfig.enabled ? (
-            <span style={{ color: "#6c757d" }}>
-              <strong>Writeback:</strong> Disabled (Enable in property panel)
-            </span>
-          ) : configuredColumns.length === 0 ? (
-            <span style={{ color: "#856404" }}>
-              <strong>Writeback:</strong> No columns configured (Add in property
-              panel)
-            </span>
-          ) : (
-            <span style={{ color: "#28a745" }}>
-              <strong>Writeback:</strong> {configuredColumns.length} column
-              {configuredColumns.length !== 1 ? "s" : ""} ready
-              <br />
-              <small>
-                Columns: {configuredColumns.map((c) => c.columnName).join(", ")}
-              </small>
-            </span>
-          )}
-        </div>
-
-        {/* Right side: Mode-specific controls */}
-        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-          {/* Loading indicators */}
-          {isApplyingSelection && (
-            <span style={{ fontSize: "12px", color: "#007acc" }}>
-              Applying selection...
-            </span>
-          )}
-
-          {isSaving && (
-            <span style={{ fontSize: "12px", color: "#28a745" }}>
-              Saving changes...
-            </span>
-          )}
-
-          {isLoadingWriteback && (
-            <span style={{ fontSize: "12px", color: "#007acc" }}>
-              Loading writeback data...
-            </span>
-          )}
-
-          {/* Edit Mode Controls - only show if writeback is active */}
-          {currentMode === "edit" && hasActiveWriteback && (
-            <>
-              {writebackConfig.saveMode === "manual" && (
-                <>
-                  <button
-                    onClick={saveAllChanges}
-                    disabled={
-                      !hasUnsavedChanges || isSaving || isLoadingWriteback
-                    }
-                    style={{
-                      padding: "6px 12px",
-                      backgroundColor:
-                        !hasUnsavedChanges || isSaving || isLoadingWriteback
-                          ? "#6c757d"
-                          : "#28a745",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor:
-                        !hasUnsavedChanges || isSaving || isLoadingWriteback
-                          ? "not-allowed"
-                          : "pointer",
-                      fontSize: "12px",
-                      fontWeight: "500",
-                    }}
-                    title={
-                      isLoadingWriteback
-                        ? "Loading existing writeback data..."
-                        : saveStatus?.success
-                        ? `Last saved: ${saveStatus.fileName} (${saveStatus.changeCount} changes)`
-                        : saveStatus && !saveStatus.success
-                        ? `Save failed: ${saveStatus.message}`
-                        : hasUnsavedChanges
-                        ? `Save ${
-                            Object.keys(editedData).length
-                          } changes to Qlik Automation`
-                        : "No changes to save"
-                    }
-                  >
-                    {isLoadingWriteback
-                      ? "Loading..."
-                      : isSaving
-                      ? "Saving..."
-                      : hasUnsavedChanges
-                      ? `Save Changes (${Object.keys(editedData).length})`
-                      : "No Changes"}
-                  </button>
-
-                  <button
-                    onClick={clearAllChanges}
-                    disabled={
-                      !hasUnsavedChanges || isSaving || isLoadingWriteback
-                    }
-                    style={{
-                      padding: "6px 12px",
-                      backgroundColor: "#dc3545",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor:
-                        !hasUnsavedChanges || isSaving || isLoadingWriteback
-                          ? "not-allowed"
-                          : "pointer",
-                      fontSize: "12px",
-                    }}
-                  >
-                    Clear Changes
-                  </button>
-                </>
-              )}
-
-              {/* Show save mode status for non-manual modes */}
-              {writebackConfig.saveMode !== "manual" && hasUnsavedChanges && (
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>
-                  {writebackConfig.saveMode === "auto"
-                    ? `Auto-save in ${writebackConfig.autoSaveDelay || 2}s`
-                    : `Batch save every ${
-                        writebackConfig.batchSaveInterval || 5
-                      }min`}
-                </span>
-              )}
-            </>
-          )}
-
-          {/* Selection Mode Controls */}
-          {currentMode === "selection" && (
-            <>
-              {selectedCells.size > 0 && (
-                <>
-                  <button
-                    onClick={onApplyCellSelections}
-                    disabled={isApplyingSelection}
-                    style={{
-                      padding: "6px 12px",
-                      backgroundColor: isApplyingSelection
-                        ? "#6c757d"
-                        : "#28a745",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor: isApplyingSelection ? "not-allowed" : "pointer",
-                      fontSize: "12px",
-                      fontWeight: "500",
-                    }}
-                  >
-                    {isApplyingSelection
-                      ? "Applying..."
-                      : `Apply Cell Selections (${selectedCells.size})`}
-                  </button>
-                  <button
-                    onClick={() => setSelectedCells(new Set())}
-                    disabled={isApplyingSelection}
-                    style={{
-                      padding: "6px 12px",
-                      backgroundColor: "#6c757d",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor: isApplyingSelection ? "not-allowed" : "pointer",
-                      fontSize: "12px",
-                    }}
-                  >
-                    Clear Cell Selections
-                  </button>
-                </>
-              )}
-
-              <button
-                onClick={() => setSelectionMode(!selectionMode)}
-                disabled={isApplyingSelection}
-                style={{
-                  padding: "6px 12px",
-                  backgroundColor: selectionMode ? "#ffc107" : "#007acc",
-                  color: selectionMode ? "#000" : "white",
-                  border: "none",
-                  borderRadius: "4px",
-                  cursor: isApplyingSelection ? "not-allowed" : "pointer",
-                  fontSize: "12px",
-                }}
-              >
-                {selectionMode ? "Exit Multi Select" : "Multi Select"}
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+      {/* NEW: Show conflict alerts */}
+      <ConflictAlert conflicts={conflicts} />
 
       {/* Table container */}
       <div
@@ -1247,8 +1870,6 @@ export default function WritebackTable({
               >
                 {columns.map((c, idx) => {
                   const isWriteback = isWritebackColumn(idx);
-
-                  // For key dimension check, use the actual column name
                   let columnName = c;
                   if (isWriteback) {
                     columnName = getWritebackColumnName(idx, layout);
@@ -1256,7 +1877,6 @@ export default function WritebackTable({
 
                   const isKeyDim =
                     !isWriteback && isKeyDimension(columnName, layout);
-
                   let config = null;
                   if (isWriteback) {
                     config = writebackColumnMap.get(columnName);
@@ -1362,7 +1982,6 @@ export default function WritebackTable({
                       const cellKey = `${i}-${j}-${cell.qText}-${cell.qElemNumber}`;
                       const isCellSelected = selectedCells.has(cellKey);
 
-                      // Check if this cell value is selected anywhere in this dimension (only for base columns)
                       const isValueSelected =
                         !isWriteback &&
                         isDynamicColumnSelectable(j, layout) &&
@@ -1382,7 +2001,6 @@ export default function WritebackTable({
 
                       const rowId = getRowId(row, actualRowIndex);
 
-                      // Get proper column name for key dimension check
                       let cellColumnName = null;
                       if (isWriteback) {
                         cellColumnName = getWritebackColumnName(j, layout);
@@ -1640,7 +2258,6 @@ export default function WritebackTable({
               </span>
             )}
 
-            {/* Key Dimensions Status */}
             {keyDimensionsSummary.hasKeyDimensions && (
               <div style={{ fontSize: 10, marginTop: 2, color: "#2e7d32" }}>
                 🔑 = Key Dimension
@@ -1655,6 +2272,12 @@ export default function WritebackTable({
           </div>
         </div>
       </div>
+
+      {/* NEW: Add User Collaboration Panel */}
+      <UserCollaborationPanel
+        isOpen={showUserPanel}
+        onClose={() => setShowUserPanel(false)}
+      />
     </div>
   );
 }
