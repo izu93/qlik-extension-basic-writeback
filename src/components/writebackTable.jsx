@@ -43,8 +43,11 @@ import {
   isBaseDimension,
 } from "../utils/dynamicColumnsUtils";
 
+// REAL USER PRESENCE INTEGRATION
+import UserPresenceService from "../utils/userPresenceService";
+
 /**
- * WritebackTable: Dynamic Columns + Key Dimensions + Active Users Support
+ * WritebackTable: Dynamic Columns + Key Dimensions + Real Active Users Support
  */
 export default function WritebackTable({
   layout,
@@ -77,12 +80,12 @@ export default function WritebackTable({
   // Auto-save timer
   const [autoSaveTimer, setAutoSaveTimer] = useState(null);
 
-  // Active Users State Management
+  // REAL USER PRESENCE - Replace mock data with real service
   const [activeUsers, setActiveUsers] = useState([]);
   const [showUserPanel, setShowUserPanel] = useState(false);
-  const [userActivity, setUserActivity] = useState({});
   const [conflicts, setConflicts] = useState([]);
   const [isWebSocketConnected, setIsWebSocketConnected] = useState(false);
+  const [presenceService, setPresenceService] = useState(null);
 
   // Use dynamic columns system
   const columns = getAllColumns(layout);
@@ -112,53 +115,70 @@ export default function WritebackTable({
     writebackColumnMap.set(config.columnName, config);
   });
 
-  // Mock data for testing (TEMPORARY - will replace with real WebSocket)
-  const mockActiveUsers = [
-    {
-      id: "user_1",
-      name: "Karthik Burra",
-      initials: "KB",
-      status: "editing",
-      editingRow: "aa16889",
-      editingFields: ["Model Feedback", "Comments"],
-      startTime: new Date(Date.now() - 2 * 60 * 1000),
-      lastActivity: new Date(),
-      isCurrentUser: true,
-    },
-    {
-      id: "user_2",
-      name: "John Smith",
-      initials: "JS",
-      status: "typing",
-      editingRow: "aa33396",
-      editingFields: ["Model Feedback"],
-      startTime: new Date(Date.now() - 30 * 1000),
-      lastActivity: new Date(Date.now() - 5 * 1000),
-      isCurrentUser: false,
-    },
-    {
-      id: "user_3",
-      name: "Mary Rodriguez",
-      initials: "MR",
-      status: "viewing",
-      editingRow: null,
-      editingFields: [],
-      startTime: new Date(Date.now() - 5 * 60 * 1000),
-      lastActivity: new Date(Date.now() - 1 * 60 * 1000),
-      isCurrentUser: false,
-    },
-  ];
+  // REAL USER PRESENCE INITIALIZATION - Replace mock data with real service
+  useEffect(() => {
+    async function initializePresenceService() {
+      if (app && layout) {
+        console.log('🔗 Initializing real user presence...');
+        
+        try {
+          const service = new UserPresenceService(app, layout);
+          
+          // Add event listeners
+          service.addEventListener('connected', (data) => {
+            console.log('✅ User presence connected:', data.user);
+            setIsWebSocketConnected(true);
+          });
+          
+          service.addEventListener('disconnected', () => {
+            console.log('❌ User presence disconnected');
+            setIsWebSocketConnected(false);
+            setActiveUsers([]);
+            setConflicts([]);
+          });
+          
+          service.addEventListener('usersUpdated', (data) => {
+            console.log('👥 Users updated:', data.users.length, 'users');
+            setActiveUsers(data.users);
+            setConflicts(data.conflicts);
+          });
+          
+          // Initialize the service
+          const initialized = await service.initialize();
+          if (initialized) {
+            setPresenceService(service);
+            console.log('🎉 Real user presence active!');
+          } else {
+            console.error('Failed to initialize presence service');
+            // Fallback to offline mode
+            setIsWebSocketConnected(false);
+          }
+          
+        } catch (error) {
+          console.error('Error initializing presence service:', error);
+          setIsWebSocketConnected(false);
+        }
+      }
+    }
 
-  const mockConflicts = [
-    {
-      rowId: "aa16889",
-      users: ["Karthik Burra", "John Smith"],
-      fields: ["Model Feedback"],
-      severity: "warning",
-    },
-  ];
+    initializePresenceService();
 
-  // Helper Functions for Active Users
+    // Cleanup on unmount
+    return () => {
+      if (presenceService) {
+        presenceService.disconnect();
+      }
+    };
+  }, [app, layout?.qInfo?.qId]);
+
+  // TRACK EDITING ACTIVITY - Add tracking for editing activity
+  const updateEditingActivity = useCallback((rowId, fields) => {
+    if (presenceService) {
+      presenceService.updateEditingStatus(rowId, fields);
+    }
+  }, [presenceService]);
+
+  // Helper Functions for Active Users (keeping existing UI components)
   const getUserStatusColor = (status) => {
     switch (status) {
       case "editing":
@@ -190,15 +210,33 @@ export default function WritebackTable({
   };
 
   const getTimeSince = (date) => {
-    const seconds = Math.floor((new Date() - date) / 1000);
+    // FIXED: Handle date parsing issues
+    let targetDate;
+    if (date instanceof Date) {
+      targetDate = date;
+    } else if (typeof date === 'string') {
+      targetDate = new Date(date);
+    } else {
+      targetDate = new Date();
+    }
+
+    // Check if date is valid
+    if (isNaN(targetDate.getTime())) {
+      return "now";
+    }
+
+    const seconds = Math.floor((new Date() - targetDate) / 1000);
+    if (seconds < 0) return "now";
     if (seconds < 60) return `${seconds}s ago`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ago`;
     const hours = Math.floor(minutes / 60);
-    return `${hours}h ago`;
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   };
 
-  // User Bubble Component - NO TOOLTIPS (panel shows details)
+  // User Bubble Component
   const UserBubble = ({ user, onClick }) => {
     return (
       <div
@@ -232,9 +270,9 @@ export default function WritebackTable({
           e.currentTarget.style.transform = "scale(1)";
         }}
         onClick={() => onClick && onClick(user)}
-        title={`${user.name} - ${user.status}${
-          user.editingRow ? ` (${user.editingRow})` : ""
-        }`}
+        title={`${user.name} - ${user.status.charAt(0).toUpperCase() + user.status.slice(1)}${
+          user.editingRow ? ` (editing ${user.editingRow})` : ""
+        }${user.editingFields.length > 0 ? ` - ${user.editingFields.join(", ")}` : ""}`}
       >
         {user.initials}
       </div>
@@ -518,20 +556,21 @@ export default function WritebackTable({
               Active Users ({activeUsers.length})
             </h4>
 
-            {activeUsers.map((user) => (
-              <div
-                key={user.id}
-                style={{
-                  background: user.isCurrentUser ? "#e8f4fd" : "#f8f9fa",
-                  border: user.isCurrentUser
-                    ? "1px solid #007acc"
-                    : "1px solid #dee2e6",
-                  borderRadius: "6px",
-                  padding: "16px",
-                  marginBottom: "12px",
-                  position: "relative",
-                }}
-              >
+            {activeUsers.map((user) => {
+              return (
+                <div
+                  key={user.id}
+                  style={{
+                    background: user.isCurrentUser ? "#e8f4fd" : "#f8f9fa",
+                    border: user.isCurrentUser
+                      ? "1px solid #007acc"
+                      : "1px solid #dee2e6",
+                    borderRadius: "6px",
+                    padding: "16px",
+                    marginBottom: "12px",
+                    position: "relative",
+                  }}
+                >
                 {/* User Header */}
                 <div
                   style={{
@@ -590,17 +629,7 @@ export default function WritebackTable({
                         </span>
                       )}
                     </div>
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "#6c757d",
-                        marginTop: "2px",
-                      }}
-                    >
-                      {getUserStatusIcon(user.status)}{" "}
-                      {user.status.charAt(0).toUpperCase() +
-                        user.status.slice(1)}
-                    </div>
+                    {/* REMOVED: Status display - bubble color shows this already */}
                   </div>
                 </div>
 
@@ -659,7 +688,7 @@ export default function WritebackTable({
                   <span>📍 Last active: {getTimeSince(user.lastActivity)}</span>
                 </div>
 
-                {/* Action Buttons - REMOVED MESSAGE BUTTONS */}
+                {/* Action Buttons */}
                 {!user.isCurrentUser &&
                   user.status === "editing" &&
                   user.editingRow && (
@@ -682,7 +711,8 @@ export default function WritebackTable({
                     </div>
                   )}
               </div>
-            ))}
+            );
+            })}
           </div>
 
           {/* Panel Footer */}
@@ -706,6 +736,11 @@ export default function WritebackTable({
                 cursor: "pointer",
                 marginBottom: "8px",
               }}
+              onClick={() => {
+                if (presenceService) {
+                  presenceService.updateUserActivity();
+                }
+              }}
             >
               🔄 Refresh All Data
             </button>
@@ -725,9 +760,10 @@ export default function WritebackTable({
     );
   };
 
-  // Active Users Header Component
+  // Active Users Header Component - Updated with real connection status
   const ActiveUsersHeader = () => {
     const activeCount = activeUsers.filter((u) => u.status !== "idle").length;
+    const connectionStatus = presenceService?.getConnectionStatus();
 
     return (
       <div
@@ -915,7 +951,7 @@ export default function WritebackTable({
               )}
             </div>
 
-            {/* Live Status */}
+            {/* Live Status - REAL connection status */}
             <div
               style={{
                 display: "flex",
@@ -935,12 +971,10 @@ export default function WritebackTable({
                   height: "6px",
                   background: isWebSocketConnected ? "#4caf50" : "#6c757d",
                   borderRadius: "50%",
-                  animation: isWebSocketConnected
-                    ? "blink 1s infinite"
-                    : "none",
+                  animation: isWebSocketConnected ? "blink 1s infinite" : "none",
                 }}
               />
-              {isWebSocketConnected ? "Live" : "Offline"} ({activeCount} users)
+              {isWebSocketConnected ? "Live" : "Offline"} ({activeCount} user{activeCount !== 1 ? 's' : ''})
             </div>
 
             {/* User Panel Toggle Button */}
@@ -1104,13 +1138,6 @@ export default function WritebackTable({
     autoSaveTimer,
   ]);
 
-  // Initialize mock data for testing
-  useEffect(() => {
-    setActiveUsers(mockActiveUsers);
-    setConflicts(mockConflicts);
-    setIsWebSocketConnected(true);
-  }, []);
-
   // Inject CSS styles
   useEffect(() => {
     const styles = `
@@ -1199,6 +1226,58 @@ export default function WritebackTable({
 
     loadExistingWritebackData();
   }, [layout?.qInfo?.qId, hasActiveWriteback]);
+
+  // ADD: Focus/blur tracking for better editing detection
+  useEffect(() => {
+    const handleFocus = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        // Try to determine which row is being edited
+        const cell = e.target.closest('td');
+        if (cell) {
+          const row = cell.closest('tr');
+          if (row) {
+            const firstCell = row.querySelector('td:first-child');
+            if (firstCell) {
+              const accountId = firstCell.textContent.trim();
+              
+              // Get column name
+              const cellIndex = Array.from(cell.parentNode.children).indexOf(cell);
+              const headers = document.querySelectorAll('th');
+              const fieldName = headers[cellIndex]?.textContent.trim();
+              
+              if (accountId && fieldName) {
+                updateEditingActivity(accountId, [fieldName]);
+              }
+            }
+          }
+        }
+      }
+    };
+
+    const handleBlur = () => {
+      // Small delay before clearing editing status
+      setTimeout(() => {
+        const activeElement = document.activeElement;
+        const stillEditing = activeElement && (
+          activeElement.tagName === 'INPUT' || 
+          activeElement.tagName === 'TEXTAREA' || 
+          activeElement.tagName === 'SELECT'
+        );
+        
+        if (!stillEditing && presenceService) {
+          presenceService.updateEditingStatus(null, []);
+        }
+      }, 100);
+    };
+
+    document.addEventListener('focusin', handleFocus);
+    document.addEventListener('focusout', handleBlur);
+
+    return () => {
+      document.removeEventListener('focusin', handleFocus);
+      document.removeEventListener('focusout', handleBlur);
+    };
+  }, [presenceService, updateEditingActivity]);
 
   // Cleanup auto-save timer on unmount
   useEffect(() => {
@@ -1304,9 +1383,11 @@ export default function WritebackTable({
     return createEnhancedRowId(row, index, layout, baseColumns);
   };
 
+  // MODIFIED: updateEditedData to track editing activity
   const updateEditedData = (rowId, field, value) => {
     const key = `${rowId}-${field}`;
     console.log("Generated key:", key);
+    
     setEditedData((prev) => {
       const newData = {
         ...prev,
@@ -1317,6 +1398,10 @@ export default function WritebackTable({
 
     setHasUnsavedChanges(true);
     scheduleAutoSave();
+    
+    // NEW: Track editing activity
+    const accountId = rowId.split('|')[0]; // Extract account ID from row ID
+    updateEditingActivity(accountId, [field]);
   };
 
   const getEditedValue = (rowId, field) => {
@@ -1374,6 +1459,7 @@ export default function WritebackTable({
     return { isValid: true };
   };
 
+  // MODIFIED: saveAllChanges to update presence after save
   const saveAllChanges = async () => {
     if (!hasUnsavedChanges || Object.keys(editedData).length === 0) {
       return;
@@ -1426,6 +1512,11 @@ export default function WritebackTable({
       setHasUnsavedChanges(false);
       setEditedData({});
 
+      // NEW: Update presence after successful save
+      if (presenceService) {
+        presenceService.updateEditingStatus(null, []);
+      }
+
       if (autoSaveTimer) {
         clearTimeout(autoSaveTimer);
         setAutoSaveTimer(null);
@@ -1452,10 +1543,20 @@ export default function WritebackTable({
     }
   };
 
+  // MODIFIED: handleModeChange to update presence
   const handleModeChange = (newMode) => {
     setCurrentMode(newMode);
     if (newMode === "selection" && selectionMode) {
       setSelectionMode(false);
+    }
+    
+    // NEW: Update presence when switching modes
+    if (presenceService) {
+      if (newMode === 'edit') {
+        presenceService.updateEditingStatus(null, []);
+      } else {
+        presenceService.updateEditingStatus(null, []);
+      }
     }
   };
 
@@ -1833,10 +1934,10 @@ export default function WritebackTable({
 
   return (
     <div style={{ width: "100%", height: "100%" }}>
-      {/* NEW: Active Users Header */}
+      {/* Active Users Header */}
       <ActiveUsersHeader />
 
-      {/* NEW: Show conflict alerts */}
+      {/* Show conflict alerts */}
       <ConflictAlert conflicts={conflicts} />
 
       {/* Table container */}
@@ -1870,11 +1971,9 @@ export default function WritebackTable({
               >
                 {columns.map((c, idx) => {
                   const isWriteback = isWritebackColumn(idx);
-                  let columnName = c;
-                  if (isWriteback) {
-                    columnName = getWritebackColumnName(idx, layout);
-                  }
-
+                  const columnName = isWriteback
+                    ? getWritebackColumnName(idx, layout)
+                    : baseColumns[idx];
                   const isKeyDim =
                     !isWriteback && isKeyDimension(columnName, layout);
                   let config = null;
@@ -2273,7 +2372,7 @@ export default function WritebackTable({
         </div>
       </div>
 
-      {/* NEW: Add User Collaboration Panel */}
+      {/* User Collaboration Panel */}
       <UserCollaborationPanel
         isOpen={showUserPanel}
         onClose={() => setShowUserPanel(false)}
